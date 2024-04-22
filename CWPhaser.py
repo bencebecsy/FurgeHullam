@@ -3,6 +3,7 @@
 import numpy as np
 import scipy.special as scs
 import scipy.optimize as sco
+import scipy.linalg as sl
 
 import numba as nb
 from numba import njit,prange
@@ -17,11 +18,13 @@ from scipy.interpolate import CubicSpline
 from scipy.interpolate import RegularGridInterpolator
 from fast_interp import interp2d
 
+
 def get_xCy(Nvec, T, sigmainv, x, y):
     """Get x^T C^{-1} y"""
     TNx = Nvec.solve(x, left_array=T)
     TNy = Nvec.solve(y, left_array=T)
     xNy = Nvec.solve(y, left_array=x)
+    print(f"{xNy:g}, {TNx @ sigmainv @ TNy:g}")
     return xNy - TNx @ sigmainv @ TNy
 
 
@@ -37,6 +40,14 @@ def innerprod(Nvec, T, sigmainv, TNT, x, y):
     TCy = get_TCy(Nvec, T, y, sigmainv, TNT)
     TCx = get_TCy(Nvec, T, x, sigmainv, TNT)
     return xCy #- TCx.T @ sigmainv @ TCy
+
+def innerprod_cho(Nvec, T, cf, x, y):
+    TNx = Nvec.solve(x, left_array=T)
+    TNy = Nvec.solve(y, left_array=T)
+    xNy = Nvec.solve(y, left_array=x)
+
+    expval = sl.cho_solve(cf, TNy)
+    return xNy - TNx @ expval
 
 class CWPhaser(object):
     """
@@ -82,9 +93,10 @@ class CWPhaser(object):
             models = []
             for p in psrs:
                 #if 'NANOGrav' in p.flags['pta']:
-                if False: #always add ecorr for now as some of my simulated pulsars have no flags #TODO: fix this later
+                if True: #always add ecorr for now as some of my simulated pulsars have no flags #TODO: fix this later
                     s2 = s + blocks.white_noise_block(vary=False, inc_ecorr=True,
-                                                      gp_ecorr=True, tnequad=tnequad)
+                                                      gp_ecorr=False, tnequad=tnequad)
+                                                      #gp_ecorr=True, tnequad=tnequad)
                     models.append(s2(p))
                 else:
                     s3 = s + blocks.white_noise_block(vary=False, inc_ecorr=False, select=None, tnequad=tnequad)
@@ -104,6 +116,7 @@ class CWPhaser(object):
             # user can specify their own pta object
             # if ECORR is included, use the implementation in gp_signals
             self.pta = pta
+            self.tref = np.min([p.toas.min() for p in psrs])
 
         self.psrs = psrs
         self.n_psr = len(psrs)
@@ -111,11 +124,12 @@ class CWPhaser(object):
         self.noisedict = noisedict
 
         # precompute important bits:
-        self.phiinvs = self.pta.get_phiinv(noisedict)
-        self.TNTs = self.pta.get_TNT(noisedict)
-        self.Nvecs = self.pta.get_ndiag(noisedict)
-        self.Ts = self.pta.get_basis(noisedict)
-        # self.cf_TNT = [sl.cho_factor(TNT + np.diag(phiinv)) for TNT, phiinv in zip(self.TNTs, self.phiinvs)]
+        self.phiinvs = self.pta.get_phiinv({})
+        #print(self.phiinvs)
+        self.TNTs = self.pta.get_TNT({})
+        self.Nvecs = self.pta.get_ndiag()
+        self.Ts = self.pta.get_basis()
+        self.cf_sigmas = [sl.cho_factor(TNT + np.diag(phiinv)) for TNT, phiinv in zip(self.TNTs, self.phiinvs)]
         self.sigmainvs = [np.linalg.pinv(TNT + np.diag(phiinv)) for TNT, phiinv in zip(self.TNTs, self.phiinvs)]
 
         self.fgw = None
@@ -126,7 +140,7 @@ class CWPhaser(object):
     def calculate_M_N(self, fgw):
         self.N = np.zeros((len(self.psrs), 2))
         self.M = np.zeros((len(self.psrs), 2, 2))
-        for ii, (psr, Nvec, TNT, T, sigmainv) in enumerate(zip(self.psrs, self.Nvecs, self.TNTs, self.Ts, self.sigmainvs)):
+        for ii, (psr, Nvec, TNT, T, sigmainv, cf) in enumerate(zip(self.psrs, self.Nvecs, self.TNTs, self.Ts, self.sigmainvs, self.cf_sigmas)):
 
             ntoa = len(psr.toas)
 
@@ -136,13 +150,16 @@ class CWPhaser(object):
             A[0, :] = np.sin(2 * np.pi * fgw * (psr.toas-self.tref))
             A[1, :] = np.cos(2 * np.pi * fgw * (psr.toas-self.tref))
 
-            self.N[ii,0] = innerprod(Nvec, T, sigmainv, TNT, A[0, :], psr.residuals)
-            self.N[ii,1] = innerprod(Nvec, T, sigmainv, TNT, A[1, :], psr.residuals)
+            #self.N[ii,0] = innerprod(Nvec, T, sigmainv, TNT, A[0, :], psr.residuals)
+            #self.N[ii,1] = innerprod(Nvec, T, sigmainv, TNT, A[1, :], psr.residuals)
+            self.N[ii,0] = innerprod_cho(Nvec, T, cf, A[0, :], psr.residuals)
+            self.N[ii,1] = innerprod_cho(Nvec, T, cf, A[1, :], psr.residuals)
 
             # define M matrix M_ij=(A_i|A_j)
             for jj in range(2):
                 for kk in range(2):
-                    self.M[ii, jj, kk] = innerprod(Nvec, T, sigmainv, TNT, A[jj, :], A[kk, :])
+                    #self.M[ii, jj, kk] = innerprod(Nvec, T, sigmainv, TNT, A[jj, :], A[kk, :])
+                    self.M[ii, jj, kk] = innerprod_cho(Nvec, T, cf, A[jj, :], A[kk, :])
 
         #save fgw so we can keep track what N and M was calculated for
         self.fgw = fgw
@@ -238,14 +255,22 @@ class CWPhaser(object):
     def save_N_M_to_file(self, filename):
         np.savez(filename, fff=self.fff, N0s=self.N0s, N1s=self.N1s, M00s=self.M00s, M11s=self.M11s, M01s=self.M01s)
 
-    def load_N_M_from_file(self, filename):
+    def load_N_M_from_file(self, filename, single_precision=False):
         npzfile = np.load(filename)
-        self.fff = npzfile["fff"]
-        self.N0s = npzfile["N0s"]
-        self.N1s = npzfile["N1s"]
-        self.M00s = npzfile["M00s"]
-        self.M11s = npzfile["M11s"]
-        self.M01s = npzfile["M01s"]
+        if single_precision:
+            self.fff = npzfile["fff"].astype('float32')
+            self.N0s = npzfile["N0s"].astype('float32')
+            self.N1s = npzfile["N1s"].astype('float32')
+            self.M00s = npzfile["M00s"].astype('float32')
+            self.M11s = npzfile["M11s"].astype('float32')
+            self.M01s = npzfile["M01s"].astype('float32')
+        else:
+            self.fff = npzfile["fff"]
+            self.N0s = npzfile["N0s"]
+            self.N1s = npzfile["N1s"]
+            self.M00s = npzfile["M00s"]
+            self.M11s = npzfile["M11s"]
+            self.M01s = npzfile["M01s"]
 
     def get_log_L_evolve(self, x):
         """
@@ -314,7 +339,8 @@ class CWPhaser(object):
         """
         #if self.N is None or self.fgw!=fgw:
         #    self.calculate_M_N(fgw)
-        assert self.fgw==fgw
+        #assert self.fgw==fgw
+        assert np.isclose(self.fgw,fgw)
 
         return log_L_helper(x, self.fgw, self.n_psr, self.psr_poses, self.N, self.M, 0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them
 
@@ -646,11 +672,16 @@ def log_L_helper(x, fgw, n_psr, psr_poses, N, M, resres, logdet):
         #print(b)
         #logLambda += np.dot(b,N[ii,:])
         #logLambda += -0.5*np.dot(b,np.dot(M[ii,:,:],b))
-
+        #print("logL")
+        #print(logL)
         for kk in range(2):
+            #print(kk)
             logL += b[kk]*N[ii,kk]
+            #print(logL, b[kk]*N[ii,kk])
             for ll in range(2):
+                #print(ll)
                 logL += -0.5*M[ii,kk,ll]*b[kk]*b[ll]
+                #print(logL, -0.5*M[ii,kk,ll]*b[kk]*b[ll])
 
     return logL
 
@@ -911,17 +942,20 @@ def integral_solution(a,b,phase1, phase2):
 #code from https://github.com/dbstein/fast_interp
 @njit(fastmath=True, parallel=False)
 def interp1d_k3(f, xout, fout, a, h, n, p, o, lb, ub):
+    #(NN0s[ii,:], [fgw,], N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
     m = fout.shape[0]
     for mi in prange(m):
-        xr = min(max(xout[mi], lb), ub)
-        xx = xr - a
-        ix = int(xx//h)
-        ratx = xx/h - (ix+0.5)
+        xr = min(max(xout[mi], lb), ub) #fgw if within bounds
+        xx = xr - a #fgw-fmin
+        ix = int(xx//h) #bin number
+        ratx = xx/h - (ix+0.5) #position within bin -0.5 meaning left edge, 0 meaning middle, 0.5 meaning right edge
         asx = np.empty(4)
         asx[0] = -1/16 + ratx*( 1/24 + ratx*( 1/4 - ratx/6))
         asx[1] =  9/16 + ratx*( -9/8 + ratx*(-1/4 + ratx/2))
         asx[2] =  9/16 + ratx*(  9/8 + ratx*(-1/4 - ratx/2))
         asx[3] = -1/16 + ratx*(-1/24 + ratx*( 1/4 + ratx/6))
+        #if ratx=-0.5-->asx=[0,1,0,0]
+        #if ratx=0.5-->asx=[0,0,1,0]
         ix += o-1
         fout[mi] = 0.0
         for i in range(4):
@@ -973,6 +1007,7 @@ def interp2d_k3(f, xout, yout, fout, a, h, n, p, o, lb, ub): #TODO: needs paddin
         iy = int(yy//h[1])
         ratx = xx/h[0] - (ix+0.5)
         raty = yy/h[1] - (iy+0.5)
+        #print(ratx,raty)
         asx = np.empty(4)
         asy = np.empty(4)
         asx[0] = -1/16 + ratx*( 1/24 + ratx*( 1/4 - ratx/6))
