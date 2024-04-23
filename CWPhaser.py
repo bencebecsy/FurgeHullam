@@ -16,7 +16,7 @@ from enterprise_extensions import blocks, deterministic
 
 from scipy.interpolate import CubicSpline
 from scipy.interpolate import RegularGridInterpolator
-from fast_interp import interp2d
+#from fast_interp import interp2d
 
 
 def get_xCy(Nvec, T, sigmainv, x, y):
@@ -208,7 +208,7 @@ class CWPhaser(object):
         self.M11s = np.zeros((len(self.psrs),n_f,n_f)) #(cos|cos)
         self.M01s = np.zeros((len(self.psrs),n_f,n_f)) #(sin|cos)
 
-        for ii, (psr, Nvec, TNT, T, sigmainv) in enumerate(zip(self.psrs, self.Nvecs, self.TNTs, self.Ts, self.sigmainvs)):
+        for ii, (psr, Nvec, T, cf) in enumerate(zip(self.psrs, self.Nvecs, self.Ts, self.cf_sigmas)):
             print(ii)
             ntoa = len(psr.toas)
             print(ntoa)
@@ -220,8 +220,10 @@ class CWPhaser(object):
                 S1 = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
                 C1 = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
 
-                NN[jj,0] = innerprod(Nvec, T, sigmainv, TNT, S1, psr.residuals)
-                NN[jj,1] = innerprod(Nvec, T, sigmainv, TNT, C1, psr.residuals)
+                #NN[jj,0] = innerprod(Nvec, T, sigmainv, TNT, S1, psr.residuals)
+                #NN[jj,1] = innerprod(Nvec, T, sigmainv, TNT, C1, psr.residuals)
+                NN[jj,0] = innerprod_cho(Nvec, T, cf, S1, psr.residuals)
+                NN[jj,1] = innerprod_cho(Nvec, T, cf, C1, psr.residuals)
 
                 for kk in range(n_f):
                     S2 = np.sin(2 * np.pi * fff[kk] * (psr.toas-self.tref))
@@ -231,9 +233,12 @@ class CWPhaser(object):
                         MM[jj,kk,0] = np.copy(MM[kk,jj,0])
                         MM[jj,kk,1] = np.copy(MM[kk,jj,1])
                     else:
-                        MM[jj,kk,0] = innerprod(Nvec, T, sigmainv, TNT, S1, S2) 
-                        MM[jj,kk,1] = innerprod(Nvec, T, sigmainv, TNT, C1, C2)
-                    MM[jj,kk,2] = innerprod(Nvec, T, sigmainv, TNT, S1, C2)
+                        #MM[jj,kk,0] = innerprod(Nvec, T, sigmainv, TNT, S1, S2) 
+                        #MM[jj,kk,1] = innerprod(Nvec, T, sigmainv, TNT, C1, C2)
+                        MM[jj,kk,0] = innerprod_cho(Nvec, T, cf, S1, S2)
+                        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, C1, C2)
+                    #MM[jj,kk,2] = innerprod(Nvec, T, sigmainv, TNT, S1, C2)
+                    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, S1, C2)
 
             #self.N0_interps.append(CubicSpline(fff, NN[:,0]))
             #self.N1_interps.append(CubicSpline(fff, NN[:,1]))
