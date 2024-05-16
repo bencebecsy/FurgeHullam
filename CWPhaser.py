@@ -17,6 +17,12 @@ from enterprise_extensions import blocks, deterministic
 from scipy.interpolate import CubicSpline
 from scipy.interpolate import RegularGridInterpolator
 #from fast_interp import interp2d
+#from scipy import optimize
+from quantecon import optimize
+
+import jax
+import jax.numpy as jnp
+
 
 
 def get_xCy(Nvec, T, sigmainv, x, y):
@@ -72,7 +78,8 @@ class CWPhaser(object):
             tmin = np.min([p.toas.min() for p in psrs])
             tmax = np.max([p.toas.max() for p in psrs])
             Tspan = tmax - tmin
-            self.tref = tmin
+            #self.tref = tmin
+            self.tref = 53000*86400
             s = gp_signals.TimingModel(use_svd=True)
             s += deterministic.cw_block_circ(amp_prior='log-uniform',
                                              psrTerm=psrTerm, tref=self.tref, name='cw')
@@ -116,14 +123,16 @@ class CWPhaser(object):
             # user can specify their own pta object
             # if ECORR is included, use the implementation in gp_signals
             self.pta = pta
-            self.tref = np.min([p.toas.min() for p in psrs])
+            #self.tref = np.min([p.toas.min() for p in psrs])
+            self.tref = 53000*86400
 
         self.psrs = psrs
         self.n_psr = len(psrs)
         self.psr_poses = np.array([psr.pos for psr in psrs])
         self.noisedict = noisedict
-
-        # precompute important bits:
+        
+        #TODO: we should have an option of not even having a PTA object if we just use precalculated grid of M and N
+        ## precompute important bits:
         self.phiinvs = self.pta.get_phiinv({})
         #print(self.phiinvs)
         self.TNTs = self.pta.get_TNT({})
@@ -260,15 +269,15 @@ class CWPhaser(object):
     def save_N_M_to_file(self, filename):
         np.savez(filename, fff=self.fff, N0s=self.N0s, N1s=self.N1s, M00s=self.M00s, M11s=self.M11s, M01s=self.M01s)
 
-    def load_N_M_from_file(self, filename, single_precision=False):
+    def load_N_M_from_file(self, filename, single_precision=False, skip_first_n_psr=0):
         npzfile = np.load(filename)
-        if single_precision:
-            self.fff = npzfile["fff"].astype('float32')
-            self.N0s = npzfile["N0s"].astype('float32')
-            self.N1s = npzfile["N1s"].astype('float32')
-            self.M00s = npzfile["M00s"].astype('float32')
-            self.M11s = npzfile["M11s"].astype('float32')
-            self.M01s = npzfile["M01s"].astype('float32')
+        if skip_first_n_psr>0:
+            self.fff = npzfile["fff"]
+            self.N0s = npzfile["N0s"][skip_first_n_psr:,:]
+            self.N1s = npzfile["N1s"][skip_first_n_psr:,:]
+            self.M00s = npzfile["M00s"][skip_first_n_psr:,:,:]
+            self.M11s = npzfile["M11s"][skip_first_n_psr:,:,:]
+            self.M01s = npzfile["M01s"][skip_first_n_psr:,:,:]
         else:
             self.fff = npzfile["fff"]
             self.N0s = npzfile["N0s"]
@@ -282,61 +291,17 @@ class CWPhaser(object):
         x --> (inc, theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (phases, psr_distances)x[Npsr])
         """
 
-        """
-        fpsrs, sigmas = fpsr_sigma_helper(x, self.n_psr, self.psr_poses)
-        fgw = 10**x[3]
-
-        Ns = np.zeros((self.n_psr,4))
-        Ms = np.zeros((self.n_psr,4,4))
-        for ii in range(self.n_psr):
-            #Ns[ii,0] = self.N0_interps[ii](fgw)
-            #Ns[ii,1] = self.N1_interps[ii](fgw)
-            #Ns[ii,2] = self.N0_interps[ii](fpsrs[ii])
-            #Ns[ii,3] = self.N1_interps[ii](fpsrs[ii])
-            Ns[ii,0::2] = self.N0_interps[ii]([fgw,fpsrs[ii]])
-            Ns[ii,1::2] = self.N1_interps[ii]([fgw,fpsrs[ii]])
-    
-            MM = np.zeros((4,4))
-            #MM[0,0] = self.M00_interps[ii]([fgw,fgw])[0]
-            #MM[1,1] = self.M11_interps[ii]([fgw,fgw])[0]
-            #MM[2,2] = self.M00_interps[ii]([fpsrs[ii],fpsrs[ii]])[0]
-            #MM[3,3] = self.M11_interps[ii]([fpsrs[ii],fpsrs[ii]])[0]
-            #MM[0,1] = self.M01_interps[ii]([fgw,fgw])[0]
-            #MM[2,3] = self.M01_interps[ii]([fpsrs[ii],fpsrs[ii]])[0]
-            #MM[0,2] = self.M00_interps[ii]([fgw,fpsrs[ii]])[0]
-            #MM[1,3] = self.M11_interps[ii]([fgw,fpsrs[ii]])[0]
-            #MM[0,3] = self.M01_interps[ii]([fgw,fpsrs[ii]])[0]
-            #MM[1,2] = self.M01_interps[ii]([fpsrs[ii],fgw])[0]
-            #M00s = self.M00_interps[ii]([[fgw,fgw],[fpsrs[ii],fpsrs[ii]],[fgw,fpsrs[ii]]])
-            #M00s = [self.M00_interps[ii](fgw,fgw), self.M00_interps[ii](fpsrs[ii],fpsrs[ii]), self.M00_interps[ii](fgw,fpsrs[ii])]
-            M00s = np.zeros(3)
-            self.M00_interps[ii](np.array([fgw,fpsrs[ii],fgw]), np.array([fgw,fpsrs[ii],fpsrs[ii]]), fout=M00s)
-            MM[0,0] = M00s[0]
-            MM[2,2] = M00s[1]
-            MM[0,2] = M00s[2]
-            #M11s = self.M11_interps[ii]([[fgw,fgw],[fpsrs[ii],fpsrs[ii]],[fgw,fpsrs[ii]]])
-            #M11s = [self.M11_interps[ii](fgw,fgw), self.M11_interps[ii](fpsrs[ii],fpsrs[ii]), self.M11_interps[ii](fgw,fpsrs[ii])]
-            M11s = np.zeros(3)
-            self.M11_interps[ii](np.array([fgw,fpsrs[ii],fgw]), np.array([fgw,fpsrs[ii],fpsrs[ii]]), fout=M11s)
-            MM[1,1] = M11s[0]
-            MM[3,3] = M11s[1]
-            MM[1,3] = M11s[2]
-            #M01s = self.M01_interps[ii]([[fgw,fgw],[fpsrs[ii],fpsrs[ii]],[fgw,fpsrs[ii]],[fpsrs[ii],fgw]])
-            #M01s = [self.M01_interps[ii](fgw,fgw), self.M01_interps[ii](fpsrs[ii],fpsrs[ii]), self.M01_interps[ii](fgw,fpsrs[ii]), self.M01_interps[ii](fpsrs[ii],fgw)]
-            M01s = np.zeros(4)
-            self.M01_interps[ii](np.array([fgw,fpsrs[ii],fgw,fpsrs[ii]]), np.array([fgw,fpsrs[ii],fpsrs[ii],fgw]), fout=M01s)
-            MM[0,1] = M01s[0]
-            MM[2,3] = M01s[1]
-            MM[0,3] = M01s[2]
-            MM[1,2] = M01s[3]
-
-            #fill in lower diagonal of MM matrix
-            Ms[ii,:,:] = MM + MM.T - np.diag(MM.diagonal())
-
-        return log_L_helper_evolve(sigmas, Ns, Ms, self.n_psr, 0.0, 0.0)
-        """
         return log_L_helper_evolve_old(x, self.n_psr, self.psr_poses, self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
                                        0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them
+
+    def get_phase_marg_log_L_evolve(self, x_nophase):
+        """
+        x --> (inc, theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (psr_distances)x[Npsr])
+        """
+
+        return phase_marg_log_L_evolve_helper(x_nophase, self.n_psr, self.psr_poses,
+                                              self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
+                                              0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them)
 
     def get_log_L(self, fgw, x):
         """
@@ -463,8 +428,10 @@ def log_L_helper_evolve(sigmas, Ns, Ms, n_psr, resres, logdet):
 
 @njit(fastmath=False, parallel=False)
 def log_L_helper_evolve_old(x, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
-    inc = x[0]
-    theta = x[1]
+    #inc = x[0]
+    #theta = x[1]
+    inc = np.arccos(x[0])
+    theta = np.arccos(x[1])
     A = 10**x[2]
     fgw = 10**x[3]
     mc = 10**x[4] * const.Tsun
@@ -525,6 +492,7 @@ def log_L_helper_evolve_old(x, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, 
         omega_p0 = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dist*(1-cosMu))**(-3/8)
 
         amp_psr = amp * (w0/omega_p0)**(1.0/3.0)
+        #amp_psr = amp * (w0/omega_p0)**(-2.0/3.0)
         phase0_psr = phases[ii]
 
         cos_phase0_psr = np.cos(phase0+phase0_psr*2.0)
@@ -538,6 +506,8 @@ def log_L_helper_evolve_old(x, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, 
                           2*sin_phase0_psr *     cos_inc    * (+sin_2psi * F_p + cos_2psi * F_c)   )
         sigma[3] =  -amp_psr*(   sin_phase0_psr * (1+cos_inc**2) * (-cos_2psi * F_p + sin_2psi * F_c) +    #Pulsar term cosine
                           2*cos_phase0_psr *     cos_inc    * (-sin_2psi * F_p - cos_2psi * F_c)   )
+
+        #print(sigma, [sigma[0]+sigma[2], sigma[1]+sigma[3]])
 
         fpsr = omega_p0/np.pi
 
@@ -588,6 +558,131 @@ def log_L_helper_evolve_old(x, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, 
 
     return logL
 
+def log_L_helper_evolve_jax(x, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
+    inc = x[0]
+    theta = x[1]
+    A = 10**x[2]
+    fgw = 10**x[3]
+    mc = 10**x[4] * const.Tsun
+    phase0 = x[5]
+    phi = x[6]
+    psi = x[7]
+    phases = jnp.copy(x[8::2])
+    pdists = jnp.copy(x[9::2])
+
+    #print(phases)
+    #print(pdists)
+    #print(x)
+
+    amp = A/(2*jnp.pi*fgw)
+
+    cos_inc = jnp.cos(inc)
+    one_plus_cos_inc_sq = 1+cos_inc**2
+    sin_phi = jnp.sin(phi)
+    cos_phi = jnp.cos(phi)
+    sin_theta = jnp.sin(theta)
+    cos_theta = jnp.cos(theta)
+    cos_2psi = jnp.cos(2*psi)
+    sin_2psi = jnp.sin(2*psi)
+    cos_phase0 = jnp.cos(phase0)
+    sin_phase0 = jnp.sin(phase0)
+    cos_phases = jnp.cos(2*phases+phase0)
+    sin_phases = jnp.sin(2*phases+phase0)
+
+    m = jnp.array([sin_phi, -cos_phi, 0.0])
+    n = jnp.array([-cos_theta * cos_phi, -cos_theta * sin_phi, sin_theta])
+    omhat = jnp.array([-sin_theta * cos_phi, -sin_theta * sin_phi, -cos_theta])
+
+    f_min = fff[0]
+    df = fff[1]-fff[0]
+    n_f = fff.size
+    f_lb = f_min - df*(3//2)
+    f_ub = fff[-1] + df*(3//2)
+
+    sigma = jnp.zeros(4)
+
+    logL = -0.5*resres -0.5*logdet
+    for ii in range(n_psr):
+        m_pos = 0.
+        n_pos = 0.
+        cosMu = 0.
+        for j in range(0,3):
+            m_pos += m[j]*psr_poses[ii,j]
+            n_pos += n[j]*psr_poses[ii,j]
+            cosMu -= omhat[j]*psr_poses[ii,j]
+
+        F_p = 0.5 * (m_pos ** 2 - n_pos ** 2) / (1 - cosMu)
+        F_c = (m_pos * n_pos) / (1 - cosMu)
+
+        p_dist = pdists[ii]*(const.kpc/const.c)
+
+        w0 = jnp.pi * fgw
+        omega_p0 = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dist*(1-cosMu))**(-3/8)
+
+        amp_psr = amp * (w0/omega_p0)**(1.0/3.0)
+        phase0_psr = phases[ii]
+
+        cos_phase0_psr = jnp.cos(phase0+phase0_psr*2.0)
+        sin_phase0_psr = jnp.sin(phase0+phase0_psr*2.0)
+        
+        sigma = sigma.at[0].set(  amp*(   cos_phase0 * (1+cos_inc**2) * (-cos_2psi * F_p + sin_2psi * F_c) +    #Earth term sine
+                                        2*sin_phase0 *     cos_inc    * (+sin_2psi * F_p + cos_2psi * F_c)   )    )
+        sigma = sigma.at[1].set( amp*(    sin_phase0 * (1+cos_inc**2) * (-cos_2psi * F_p + sin_2psi * F_c) +    #Earth term cosine
+                                        2*cos_phase0 *     cos_inc    * (-sin_2psi * F_p - cos_2psi * F_c)   )    )
+        sigma = sigma.at[2].set( -amp_psr*(   cos_phase0_psr * (1+cos_inc**2) * (-cos_2psi * F_p + sin_2psi * F_c) +    #Pulsar term sine
+                                            2*sin_phase0_psr *     cos_inc    * (+sin_2psi * F_p + cos_2psi * F_c)   )    )
+        sigma = sigma.at[3].set( -amp_psr*(   sin_phase0_psr * (1+cos_inc**2) * (-cos_2psi * F_p + sin_2psi * F_c) +    #Pulsar term cosine
+                                            2*cos_phase0_psr *     cos_inc    * (-sin_2psi * F_p - cos_2psi * F_c)   )    )
+
+        fpsr = omega_p0/jnp.pi
+
+        Ns = jnp.zeros(4)
+        MM = jnp.zeros((4,4))
+
+        N0s = jnp.zeros(2)
+        interp1d_k3_jax(jnp.array(NN0s[ii,:]), [fgw,fpsr], N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
+        N1s = jnp.zeros(2)
+        interp1d_k3_jax(jnp.array(NN1s[ii,:]), [fgw,fpsr], N1s, f_min, df, n_f, False, 0, f_lb, f_ub)
+
+        Ns = Ns.at[0].set(N0s[0])
+        Ns = Ns.at[1].set(N1s[0])
+        Ns = Ns.at[2].set(N0s[1])
+        Ns = Ns.at[3].set(N1s[1])
+
+        M00s = jnp.zeros(3)
+        interp2d_k3_jax(jnp.array(MM00s[ii,:,:]), [fgw,fpsr,fgw], [fgw,fpsr,fpsr], M00s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM = MM.at[0,0].set(M00s[0])
+        MM = MM.at[2,2].set(M00s[1])
+        MM = MM.at[0,2].set(M00s[2])
+
+        M11s = jnp.zeros(3)
+        interp2d_k3_jax(jnp.array(MM11s[ii,:,:]), [fgw,fpsr,fgw], [fgw,fpsr,fpsr], M11s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM = MM.at[1,1].set(M11s[0])
+        MM = MM.at[3,3].set(M11s[1])
+        MM = MM.at[1,3].set(M11s[2])
+
+        M01s = jnp.zeros(4)
+        interp2d_k3_jax(jnp.array(MM01s[ii,:,:]), [fgw,fpsr,fgw,fpsr], [fgw,fpsr,fpsr,fgw], M01s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM = MM.at[0,1].set(M01s[0])
+        MM = MM.at[2,3].set(M01s[1])
+        MM = MM.at[0,3].set(M01s[2])
+        MM = MM.at[1,2].set(M01s[3])
+
+        #fill in lower diagonal of MM matrix
+        #Ms = MM + MM.T - np.diag(MM.diagonal())
+        Ms = MM + MM.T - jnp.diag(jnp.diag(MM))
+
+        #print(fgw, fpsr)
+        #print(Ns)
+        #print(Ms)
+
+        for jj in range(4):
+            logL += sigma[jj] * Ns[jj]
+            for kk in range(4):
+                logL += -0.5*sigma[jj]*sigma[kk] * Ms[jj,kk]
+
+    return logL
+
 @njit(fastmath=False)
 def incoherent_log_L_helper(x, fgw, n_psr, N, M, resres, logdet):
     #A = 10**x[0]
@@ -617,8 +712,10 @@ def incoherent_log_L_helper(x, fgw, n_psr, N, M, resres, logdet):
 
 @njit(fastmath=False)
 def log_L_helper(x, fgw, n_psr, psr_poses, N, M, resres, logdet):
-    inc = x[0]
-    theta = x[1]
+    #inc = x[0]
+    #theta = x[1]
+    inc = np.arccos(x[0])
+    theta = np.arccos(x[1])
     A = 10**x[2]
     phase0 = x[3]
     phi = x[4]
@@ -729,12 +826,13 @@ def incoherent_phase_marg_log_L_helper(x_com, fgw, n_psr, N, M, resres, logdet):
 
 @njit(fastmath=False)
 def phase_marg_log_L_helper(x_com, fgw, n_psr, psr_poses, N, M, resres, logdet):
-    inc = x_com[0]
-    theta = x_com[1]
+    inc = np.arccos(x_com[0])
+    theta = np.arccos(x_com[1])
     A = 10**x_com[2]
     phase0 = x_com[3]
     phi = x_com[4]
     psi = x_com[5]
+    #print(x_com)
 
     Amp = A/(2*np.pi*fgw)
 
@@ -783,6 +881,8 @@ def phase_marg_log_L_helper(x_com, fgw, n_psr, psr_poses, N, M, resres, logdet):
         BB = F_p*a2 + F_c*a4
 
         #print(AA, BB)
+        #print(N[ii,:])
+        #print(M[ii,:,:])
         #print(M[ii,0,0], M[ii,1,1], M[ii,0,1])
         #print(BB**2/2*M[ii,0,0], -AA**2/2*M[ii,1,1], AA*BB*M[ii,0,1])
         #print(-BB**2*M[ii,0,0])
@@ -817,34 +917,297 @@ def phase_marg_log_L_helper(x_com, fgw, n_psr, psr_poses, N, M, resres, logdet):
 
     return logL_marg
 
+@njit(fastmath=False)
+def phase_marg_log_L_evolve_helper(x_nophase, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
+    #inc = x[0]
+    #theta = x[1]
+    inc = np.arccos(x_nophase[0])
+    theta = np.arccos(x_nophase[1])
+    A = 10**x_nophase[2]
+    fgw = 10**x_nophase[3]
+    mc = 10**x_nophase[4] * const.Tsun
+    phase0 = x_nophase[5]
+    phi = x_nophase[6]
+    psi = x_nophase[7]
+    pdists = np.copy(x_nophase[8:])
+
+    #print(phases)
+    #print(pdists)
+    #print(x_nophase)
+
+    Amp = A/(2*np.pi*fgw)
+
+    cos_inc = np.cos(inc)
+    one_plus_cos_inc_sq = 1+cos_inc**2
+    sin_phi = np.sin(phi)
+    cos_phi = np.cos(phi)
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    cos_2psi = np.cos(2*psi)
+    sin_2psi = np.sin(2*psi)
+    cos_phase0 = np.cos(phase0)
+    sin_phase0 = np.sin(phase0)
+
+    m = np.array([sin_phi, -cos_phi, 0.0])
+    n = np.array([-cos_theta * cos_phi, -cos_theta * sin_phi, sin_theta])
+    omhat = np.array([-sin_theta * cos_phi, -sin_theta * sin_phi, -cos_theta])
+
+    f_min = fff[0]
+    df = fff[1]-fff[0]
+    n_f = fff.size
+    f_lb = f_min - df*(3//2)
+    f_ub = fff[-1] + df*(3//2)
+
+    logL_marg = -0.5*resres -0.5*logdet
+    #for ii in range(n_psr):
+    for ii in prange(n_psr):
+        m_pos = 0.
+        n_pos = 0.
+        cosMu = 0.
+        for j in range(0,3):
+            m_pos += m[j]*psr_poses[ii,j]
+            n_pos += n[j]*psr_poses[ii,j]
+            cosMu -= omhat[j]*psr_poses[ii,j]
+
+        F_p = 0.5 * (m_pos ** 2 - n_pos ** 2) / (1 - cosMu)
+        F_c = (m_pos * n_pos) / (1 - cosMu)
+
+        p_dist = pdists[ii]*(const.kpc/const.c)
+
+        w0 = np.pi * fgw
+        omega_p0 = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dist*(1-cosMu))**(-3/8)
+
+        #chi = (omega_p0/w0)**(2.0/3.0)
+        #maybe actually:
+        chi = (omega_p0/w0)**(-1.0/3.0)
+
+        fpsr = omega_p0/np.pi
+        #print(w0/np.pi, fpsr)
+        N = np.zeros(4)
+        MM = np.zeros((4,4))
+
+        N0s = np.zeros(2)
+        interp1d_k3(NN0s[ii,:], [fgw,fpsr], N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
+        N1s = np.zeros(2)
+        interp1d_k3(NN1s[ii,:], [fgw,fpsr], N1s, f_min, df, n_f, False, 0, f_lb, f_ub)
+
+        N[0] = N0s[0]
+        N[1] = N1s[0]
+        N[2] = N0s[1]
+        N[3] = N1s[1]
+
+        M00s = np.zeros(3)
+        interp2d_k3(MM00s[ii,:,:], [fgw,fpsr,fgw], [fgw,fpsr,fpsr], M00s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[0,0] = M00s[0]
+        MM[2,2] = M00s[1]
+        MM[0,2] = M00s[2]
+
+        M11s = np.zeros(3)
+        interp2d_k3(MM11s[ii,:,:], [fgw,fpsr,fgw], [fgw,fpsr,fpsr], M11s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[1,1] = M11s[0]
+        MM[3,3] = M11s[1]
+        MM[1,3] = M11s[2]
+
+        M01s = np.zeros(4)
+        interp2d_k3(MM01s[ii,:,:], [fgw,fpsr,fgw,fpsr], [fgw,fpsr,fpsr,fgw], M01s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[0,1] = M01s[0]
+        MM[2,3] = M01s[1]
+        MM[0,3] = M01s[2]
+        MM[1,2] = M01s[3]
+
+        #fill in lower diagonal of MM matrix
+        #Ms = MM + MM.T - np.diag(MM.diagonal())
+        M = MM + MM.T - np.diag(np.diag(MM))
+
+        #print(fgw, fpsr)
+        #print(Ns)
+        #print(Ms)
+
+        #define Fe coefficients
+        #a1 =  Amp * (one_plus_cos_inc_sq*cos_2phase0*cos_2psi + 2*cos_inc*sin_2phase0*sin_2psi)
+        #a2 = -Amp * (one_plus_cos_inc_sq*sin_2phase0*cos_2psi - 2*cos_inc*cos_2phase0*sin_2psi)
+        #a3 =  Amp * (one_plus_cos_inc_sq*cos_2phase0*sin_2psi - 2*cos_inc*sin_2phase0*cos_2psi)
+        #a4 = -Amp * (one_plus_cos_inc_sq*sin_2phase0*sin_2psi + 2*cos_inc*cos_2phase0*cos_2psi)
+        a1 =  Amp * (-one_plus_cos_inc_sq*cos_phase0*cos_2psi + 2*cos_inc*sin_phase0*sin_2psi)
+        a2 = -Amp * ( one_plus_cos_inc_sq*sin_phase0*cos_2psi + 2*cos_inc*cos_phase0*sin_2psi)
+        a3 =  Amp * ( one_plus_cos_inc_sq*cos_phase0*sin_2psi + 2*cos_inc*sin_phase0*cos_2psi)
+        a4 =  Amp * ( one_plus_cos_inc_sq*sin_phase0*sin_2psi - 2*cos_inc*cos_phase0*cos_2psi)
+        #print(a1,a2,a3,a4)
+        #define AA and BB
+        AA = F_p*a1 + F_c*a3
+        BB = F_p*a2 + F_c*a4
+
+        #print(AA, BB)
+        #print(chi)
+        #print(N)
+        #print(M)
+        #print(BB**2/2*M[ii,0,0], -AA**2/2*M[ii,1,1], AA*BB*M[ii,0,1])
+        #print(-BB**2*M[ii,0,0])
+
+        #f(phi_psr)=alpha + beta*sin(phi_psr) + gamma*cos(phi_psr) + delta*sin(2*phi_psr) + epsilon*cos(2*phi_psr)
+        alpha = AA*N[0] + BB*N[1] - (AA**2)/2*M[0,0] - (BB**2)/2*M[1,1] - AA*BB*M[0,1] - chi**2*(AA**2+BB**2)/4*M[2,2] - chi**2*(AA**2+BB**2)/4*M[3,3]
+        beta = -chi*BB*N[2] + chi*AA*N[3] + chi*AA*BB*M[0,2] - chi*AA**2*M[0,3] + chi*BB**2*M[1,2] - chi*AA*BB*M[1,3]
+        gamma = -chi*AA*N[2] - chi*BB*N[3] + chi*AA**2*M[0,2] + chi*AA*BB*M[0,3] + chi*AA*BB*M[1,2] + chi*BB**2*M[1,3]
+        delta = -chi**2*AA*BB/2*(M[2,2]-M[3,3]) + chi**2*(AA**2-BB**2)/2*M[2,3]
+        epsilon = -chi**2*(AA**2-BB**2)/4*M[2,2] - chi**2*(BB**2-AA**2)/4*M[3,3] - chi**2*AA*BB*M[2,3]
+        
+        #convert it into format: a*cos(phi_psr+phase1)+b*cos(2*phi_psr+2*phase2)
+        aa = np.sqrt(beta**2+gamma**2)
+        bb = np.sqrt(delta**2+epsilon**2)
+        phase1 = np.arctan2(-beta,gamma)
+        phase2 = np.arctan2(-delta,epsilon) / 2 #divide by 2 because of how we defined phase2
+        
+        #print(ii)
+        #if True:#ii==32:
+        #    print(alpha, beta, gamma, delta, epsilon)
+
+            #print(aa, bb, phase1, phase2)
+        ####integral = integral_solution(aa,bb,phase1, phase2)
+        #integral = integral_solution_num(aa,bb,phase1, phase2)
+        #integral = integral_solution(aa,0.0,0.0,0.0)
+        #print(alpha, integral, np.log(integral))
+        ####logL_marg += alpha + np.log(integral)
+
+        ##log_integral = log_integral_solution_num(alpha, aa, bb, phase1, phase2, n_points=1_000)
+        #print(alpha, log_integral)
+        #print(alpha + log_integral)
+        ##logL_marg += log_integral
+
+        ###########logL_marg += log_integral_solution_laplace(alpha, aa, bb, phase1, phase2)
+
+        #integral_pre, integral_exp = integral_solution(aa,bb,phase1, phase2)
+        #logL_marg += alpha + integral_exp + np.log(integral_pre)
+
+        #decide method based on amplitudes - Bessels for small, Laplace for large
+        
+        if (aa+bb)<30.0: #Bessel
+            #print("BESSEL")
+            integral = integral_solution(aa,bb,phase1, phase2)
+            logL_marg += alpha + np.log(integral)
+        else: #Laplace
+            #print("LAPLACE")
+            #print(alpha, aa, bb, phase1, phase2)
+            #init_guess = (2*np.pi-(phase1-phase2))%(2*np.pi)
+            #phi_max = optimize.newton(log_integrand_prime, init_guess, args=(aa,bb,phase1,phase2), fprime=log_integrand_double_prime)[0]
+            #phi_max = optimize.newton_halley(log_integrand_prime, init_guess, log_integrand_double_prime, log_integrand_3prime, args=(aa,bb,phase1,phase2))[0]
+            roots = np.array([optimize.brentq(log_integrand_prime, 0.0, np.pi, args=(aa,bb,phase1,phase2))[0],
+                              optimize.brentq(log_integrand_prime, np.pi, 2*np.pi, args=(aa,bb,phase1,phase2))[0]])
+            #print(roots)
+            phi_max = roots[np.where(log_integrand_double_prime(roots,aa,bb,phase1,phase2)<0.0)][0]
+            #print(phi_max)
+            logL_marg += log_integral_solution_laplace(alpha, aa, bb, phase1, phase2, phi_max)
+
+    #print(logL_marg)
+
+    return logL_marg
+
 
 @njit(fastmath=False)
-def integral_solution(a,b,phase1, phase2):
-    #nmax = 30
-    nmax = min(100,int(a+b))
-    #print(nmax)
-    #Seems to catch very large signals that cause trouble
-    #TODO: come up with a better way to handle these
-    if nmax==100:
-        return 0.0
+def log_integral_solution_laplace(alpha, a, b, phase1, phase2, phi_max):
+    sigma_sq = np.abs(log_integrand_double_prime(phi_max,a,b,phase1,phase2))
+    L3 = log_integrand_3prime(phi_max,a,b,phase1,phase2)
+    L4 = log_integrand_4prime(phi_max,a,b,phase1,phase2)
+    L5 = log_integrand_5prime(phi_max,a,b,phase1,phase2)
+    L6 = log_integrand_6prime(phi_max,a,b,phase1,phase2)
+
+    #return alpha + log_integrand(phi_max) - 0.5*np.log(2*np.pi*np.abs(log_integrand_double_prime(phi_max)))
+    res = alpha + log_integrand(phi_max,a,b,phase1,phase2) - 0.5*np.log(2*np.pi*sigma_sq)
+    #print(res, log_integrand_4prime(phi_max)/log_integrand_double_prime(phi_max)**2/8, 5*log_integrand_3prime(phi_max)**2/log_integrand_double_prime(phi_max)**4/24)
+    #res += np.log(1 +
+    #              L4/sigma_sq**2/8 +
+    #              5*L3**2/sigma_sq**3/24)
+    res += np.log(1 +
+                  L4/sigma_sq**2/8 +
+                  5*L3**2/sigma_sq**3/24 +
+                  L6/sigma_sq**3/48 +
+                  35*L4**2/sigma_sq**4/384 + 
+                  7*L3*L5/sigma_sq**4/48 +
+                  35*L3**2*L4/sigma_sq**5/64 +
+                  385*L3**4/sigma_sq**6/1152)
+
+    return res
+
+@njit(fastmath=False)
+def log_integrand(phi,a,b,phase1,phase2):
+    return b*np.cos(2*phi) + a*np.cos(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_prime(phi,a,b,phase1,phase2):
+    return -2*b*np.sin(2*phi) - a*np.sin(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_double_prime(phi,a,b,phase1,phase2):
+    return -4*b*np.cos(2*phi) - a*np.cos(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_3prime(phi,a,b,phase1,phase2):
+    return 8*b*np.sin(2*phi) + a*np.sin(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_4prime(phi,a,b,phase1,phase2):
+    return 16*b*np.cos(2*phi) + a*np.cos(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_5prime(phi,a,b,phase1,phase2):
+    return -32*b*np.sin(2*phi) - a*np.sin(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integrand_6prime(phi,a,b,phase1,phase2):
+    return -64*b*np.cos(2*phi) - a*np.cos(phi+phase1-phase2)
+
+@njit(fastmath=False)
+def log_integral_solution_num(alpha, a, b, phase1, phase2, n_points=1_000):
+    phis = np.linspace(0,2*np.pi,n_points)
+    d_phi = phis[1]-phis[0]
 
     #a*cos(x+phase1) = a_p*cos(x)+c_p*sin(x)
     a_p = a*np.cos(phase1-phase2)
     c_p = -a*np.sin(phase1-phase2)
     #print(a_p, c_p)
 
-    res = scs.iv(0.0,a_p)*scs.iv(0.0,b)*scs.iv(0.0,c_p)
-    #print(2*np.pi*res)
+    #be more clever about factoring out large values
+    #factor_out = np.sqrt(a_p**2+c_p**2+b**2)
+    log_integrand = alpha+a_p*np.cos(2*phis)+c_p*np.sin(2*phis)+b*np.cos(4*phis)
+    factor_out = np.max(log_integrand)
+    #print(factor_out)
+    #print(np.max(log_integrand))
+    integrand = np.exp(log_integrand-factor_out)
+    #print(integrand)
+    res = np.trapz(integrand, dx=d_phi)/2/np.pi
+    return np.log(res) + factor_out
+
+
+@njit(fastmath=False)
+def integral_solution(a,b,phase1, phase2):
+    #nmax = 10
+    nmax = max(min(50,int(a+b)),2)
+    #print(a,b)
+    #print(nmax)
+    #Seems to catch very large signals that cause trouble
+    #TODO: come up with a better way to handle these - maybe just resort to numerical integration if this happens
+    #if nmax==100:
+    #    return 0.0
+
+    #a*cos(x+phase1) = a_p*cos(x)+c_p*sin(x)
+    a_p = a*np.cos(phase1-phase2)
+    c_p = -a*np.sin(phase1-phase2)
+    #print(a_p, c_p)
+
+    res = scs.iv(0.0,a)*scs.iv(0.0,b) #this now actually replaces the two below for hopefully more stability
+    ###res = scs.iv(0.0,a_p)*scs.iv(0.0,b)*scs.iv(0.0,c_p)
+    #print(res)
+    #this is to replace the second term below with an expression that doesn't sum over n
+    ###res += scs.iv(0.0,b)*(scs.iv(0.0,a) - scs.iv(0.0,a_p)*scs.iv(0.0,c_p))
     for n in range(1, nmax+1):
         n_float = float(n)
         #print("-"*10)
         #print(n)
         res += 2*scs.iv(0.0,c_p) * scs.iv(2*n_float,a_p)*scs.iv(n_float,b)
-        #print(2*np.pi*res, 2*np.pi*2*scs.iv(0,c_p) * scs.iv(2*n,a_p)*scs.iv(n,b))
-        res += 2*scs.iv(0.0,b)   * scs.iv(2*n_float,a_p)*scs.iv(2*n_float,c_p)                 * (-1)**n
-        #print(2*np.pi*res, 2*np.pi*2*scs.iv(0,b)   * scs.iv(2*n,a_p)*scs.iv(2*n,c_p)                 * (-1)**n)
+        #print(res, 2*np.pi*2*scs.iv(0.0,c_p) * scs.iv(2*n_float,a_p)*scs.iv(n_float,b))
+        ####res += 2*scs.iv(0.0,b)   * scs.iv(2*n_float,a_p)*scs.iv(2*n_float,c_p)                 * (-1)**n ###replaced with single term above outside of sum over n
+        #print(res, 2*np.pi*2*scs.iv(0.0,b)   * scs.iv(2*n_float,a_p)*scs.iv(2*n_float,c_p)                 * (-1)**n)
         res += 2*scs.iv(0.0,a_p) * scs.iv(n_float,b)*scs.iv(2*n_float,c_p)                     * (-1)**n
-        #print(2*np.pi*res, 2*np.pi*2*scs.iv(0,a_p) * scs.iv(n,b)*scs.iv(2*n,c_p)                     * (-1)**n)
+        #print(res, 2*np.pi*2*scs.iv(0.0,a_p) * scs.iv(n_float,b)*scs.iv(2*n_float,c_p)                     * (-1)**n)
         ###### triple terms
         for k in range(1,int(n/2)+1):
             k_float = float(k)
@@ -853,27 +1216,33 @@ def integral_solution(a,b,phase1, phase2):
             if n%2==0 and k%2==0:
                 #print(f"({n}, {k}, {n-k})-->({n/2}, {k}, {n-k})")
                 res += 2               * scs.iv(n_float/2,b)*scs.iv(k_float,c_p)*scs.iv(n_float-k_float,a_p)     * (-1)**(k/2)
+                #print(res, 2               * scs.iv(n_float/2,b)*scs.iv(k_float,c_p)*scs.iv(n_float-k_float,a_p)     * (-1)**(k/2))
             # (k, n, n-k) --> needs n and k even
             if n%2==0 and (n-k)%2==0:
                 #print(f"({k}, {n}, {n-k})-->({k/2}, {n}, {n-k})")
                 res += 2               * scs.iv(k_float/2,b)*scs.iv(n_float,c_p)*scs.iv(n_float-k_float,a_p)     * (-1)**(n/2)
+                #print(res, 2               * scs.iv(k_float/2,b)*scs.iv(n_float,c_p)*scs.iv(n_float-k_float,a_p)     * (-1)**(n/2))
             # (k, n-k, n) --> needs k and n-k even
             if n%2==0 and (n-k)%2==0:
                 #print(f"({k}, {n-k}, {n})-->({k/2}, {n-k}, {n})")
                 res += 2               * scs.iv(k_float/2,b)*scs.iv(n_float-k_float,c_p)*scs.iv(n_float,a_p)     * (-1)**((n-k)/2)
+                #print(res, 2               * scs.iv(k_float/2,b)*scs.iv(n_float-k_float,c_p)*scs.iv(n_float,a_p)     * (-1)**((n-k)/2))
             if k!=(n-k): #only do these if all three indices are distinct, otherwise we double count
                 # (n, n-k, k) --> needs n and n-k even
                 if n%2==0 and (n-k)%2==0:
                     #print(f"({n}, {n-k}, {k})-->({n/2}, {n-k}, {k})")
                     res += 2               * scs.iv(n_float/2,b)*scs.iv(n_float-k_float,c_p)*scs.iv(k_float,a_p)     * (-1)**((n-k)/2)
+                    #print(res, 2               * scs.iv(n_float/2,b)*scs.iv(n_float-k_float,c_p)*scs.iv(k_float,a_p)     * (-1)**((n-k)/2))
                 # (n-k, n, k) --> needs n-k and n even
                 if n%2==0 and (n-k)%2==0:
                     #print(f"({n-k}, {n}, {k})-->({(n-k)/2}, {n}, {k})")
                     res += 2               * scs.iv((n_float-k_float)/2,b)*scs.iv(n_float,c_p)*scs.iv(k_float,a_p)     * (-1)**(n/2)
+                    #print(res, 2               * scs.iv((n_float-k_float)/2,b)*scs.iv(n_float,c_p)*scs.iv(k_float,a_p)     * (-1)**(n/2))
                 # (n-k, k, n) --> needs n-k and k even
                 if n%2==0 and (n-k)%2==0:
                     #print(f"({n-k}, {k}, {n})-->({(n-k)/2}, {k}, {n})")
                     res += 2               * scs.iv((n_float-k_float)/2,b)*scs.iv(k_float,c_p)*scs.iv(n_float,a_p)     * (-1)**(k/2)
+                    #print(res, 2               * scs.iv((n_float-k_float)/2,b)*scs.iv(k_float,c_p)*scs.iv(n_float,a_p)     * (-1)**(k/2))
         
     return res
 
@@ -967,6 +1336,44 @@ def interp1d_k3(f, xout, fout, a, h, n, p, o, lb, ub):
             ixi = (ix + i) % n if p else ix + i
             fout[mi] += f[ixi]*asx[i]
 
+def interp1d_k3_jax(f, xout, fout, a, h, n, p, o, lb, ub):
+    #(NN0s[ii,:], [fgw,], N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
+    m = fout.shape[0]
+    for mi in range(m):
+        xr = jnp.minimum(jnp.maximum(xout[mi], lb), ub) #fgw if within bounds
+        xx = xr - a #fgw-fmin
+        #ix = int(xx//h) #bin number
+        #ix = jnp.array(xx // h, dtype=int)
+        ix = (xx//h).astype(int)
+        #ix = xx//h
+        ratx = xx/h - (ix+0.5) #position within bin -0.5 meaning left edge, 0 meaning middle, 0.5 meaning right edge
+        #asx = jnp.empty(4)
+        #asx = asx.at[0].set(-1/16 + ratx*( 1/24 + ratx*( 1/4 - ratx/6)) )
+        #asx = asx.at[1].set( 9/16 + ratx*( -9/8 + ratx*(-1/4 + ratx/2)) )
+        #asx = asx.at[2].set( 9/16 + ratx*(  9/8 + ratx*(-1/4 - ratx/2)) )
+        #asx = asx.at[3].set(-1/16 + ratx*(-1/24 + ratx*( 1/4 + ratx/6)) )
+        asx = jnp.array([-1/16 + ratx*(1/24 + ratx*(1/4 - ratx/6)),
+                         9/16 + ratx*(-9/8 + ratx*(-1/4 + ratx/2)),
+                         9/16 + ratx*(9/8 + ratx*(-1/4 - ratx/2)),
+                         -1/16 + ratx*(-1/24 + ratx*(1/4 + ratx/6))])
+        #if ratx=-0.5-->asx=[0,1,0,0]
+        #if ratx=0.5-->asx=[0,0,1,0]
+        ix += o-1
+        fout = fout.at[mi].set(0.0)
+        for i in range(4):
+            ixi = ix + i
+            #fout[mi] += f[ixi]*asx[i]
+            fout = fout.at[mi].set(fout[mi] + f[ixi]*asx[i])
+            #print(ixi)
+            #print(f)
+            #print(f[ixi])
+        # Compute the sum using jnp.sum and jnp.multiply
+        #sum_term = jnp.sum(jnp.multiply(f[ix + i], asx[i]) for i in range(4))
+
+        # Update fout using index_update
+        #fout = jax.ops.index_update(fout, mi, sum_term)
+
+    return fout
 
 #code from https://github.com/dbstein/fast_interp
 @njit(fastmath=True, parallel=False) #TODO: can potentially be sped up further as some of asx and asy are repetitive (can be seen by printing them out)
@@ -1034,3 +1441,48 @@ def interp2d_k3(f, xout, yout, fout, a, h, n, p, o, lb, ub): #TODO: needs paddin
                 iyj = iy + j
                 #print(f[ixi,iyj])
                 fout[mi] += f[ixi,iyj]*asx[i]*asy[j]
+
+
+
+def interp2d_k3_jax(f, xout, yout, fout, a, h, n, p, o, lb, ub): #TODO: needs padding to avoid nans close to the edge
+    """
+    JAXified version of same
+    """
+    m = fout.shape[0]
+    for mi in prange(m):
+        xr = jnp.minimum(jnp.maximum(xout[mi], lb[0]), ub[0])
+        yr = jnp.minimum(jnp.maximum(yout[mi], lb[1]), ub[1])
+        xx = xr - a[0]
+        yy = yr - a[1]
+        #ix = int(xx//h[0])
+        #iy = int(yy//h[1])
+        #ix = jnp.array(xx // h[0], dtype=int)
+        #iy = jnp.array(yy // h[1], dtype=int)
+        ix = (xx//h[0]).astype(int)
+        iy = (yy//h[1]).astype(int)
+        ratx = xx/h[0] - (ix+0.5)
+        raty = yy/h[1] - (iy+0.5)
+        #print(ratx,raty)
+        asx = jnp.empty(4)
+        asy = jnp.empty(4)
+        asx = asx.at[0].set(-1/16 + ratx*( 1/24 + ratx*( 1/4 - ratx/6)) )
+        asx = asx.at[1].set( 9/16 + ratx*( -9/8 + ratx*(-1/4 + ratx/2)) )
+        asx = asx.at[2].set( 9/16 + ratx*(  9/8 + ratx*(-1/4 - ratx/2)) )
+        asx = asx.at[3].set(-1/16 + ratx*(-1/24 + ratx*( 1/4 + ratx/6)) )
+        asy = asy.at[0].set(-1/16 + raty*( 1/24 + raty*( 1/4 - raty/6)) )
+        asy = asy.at[1].set( 9/16 + raty*( -9/8 + raty*(-1/4 + raty/2)) )
+        asy = asy.at[2].set( 9/16 + raty*(  9/8 + raty*(-1/4 - raty/2)) )
+        asy = asy.at[3].set(-1/16 + raty*(-1/24 + raty*( 1/4 + raty/6)) )
+        #print(asx)
+        #print(asy)
+        ix += o[0]-1
+        iy += o[1]-1
+        fout = fout.at[mi].set(0.0)
+        for i in range(4):
+            ixi = ix + i
+            for j in range(4):
+                iyj = iy + j
+                #print(f[ixi,iyj])
+                #fout[mi] += f[ixi,iyj]*asx[i]*asy[j]
+                fout = fout.at[mi].set(fout[mi] + f[ixi,iyj]*asx[i]*asy[j])
+
