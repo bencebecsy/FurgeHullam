@@ -19,6 +19,7 @@ from scipy.interpolate import RegularGridInterpolator
 #from fast_interp import interp2d
 #from scipy import optimize
 from quantecon import optimize
+from . import myerfinv
 
 
 def innerprod_cho(Nvec, T, cf, x, y):
@@ -104,6 +105,7 @@ class CWPhaser(object):
         self.psrs = psrs
         self.n_psr = len(psrs)
         self.psr_poses = np.array([psr.pos for psr in psrs])
+        self.psr_pdists = np.array([psr.pdist for psr in psrs])
         self.noisedict = noisedict
         
         #TODO: we should have an option of not even having a PTA object if we just use precalculated grid of M and N
@@ -263,7 +265,7 @@ class CWPhaser(object):
 
     def get_log_L_evolve(self, x):
         """
-        x --> (inc, theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (phases, psr_distances)x[Npsr])
+        x --> (cos_inc, cos_theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (phases, psr_distances)x[Npsr])
         """
 
         return log_L_helper_evolve(x, self.n_psr, self.psr_poses, self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
@@ -271,16 +273,24 @@ class CWPhaser(object):
 
     def get_phase_marg_log_L_evolve(self, x_nophase):
         """
-        x --> (inc, theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (psr_distances)x[Npsr])
+        x_nophase --> (cos_inc, cos_theta, log10_A, log10_f, log10_mc, phhase0, phi, psi, (psr_distances)x[Npsr])
         """
 
         return phase_marg_log_L_evolve_helper(x_nophase, self.n_psr, self.psr_poses,
                                               self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
                                               0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them)
 
+    def get_phase_dist_marg_log_L_evolve(self, x_com):
+        """
+        x_com --> (cos_inc, cos_theta, log10_A, log10_f, log10_mc, phhase0, phi, psi)
+        """
+        return phase_dist_marg_log_L_evolve_helper(x_com, self.n_psr, self.psr_poses, self.psr_pdists,
+                                                   self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
+                                                   0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them)
+
     def get_log_L(self, fgw, x):
         """
-        x --> (inc, theta, log10_A, phhase0, phi, psi, phases[Npsr])
+        x --> (cos_inc, cos)theta, log10_A, phhase0, phi, psi, phases[Npsr])
         """
         #if self.N is None or self.fgw!=fgw:
         #    self.calculate_M_N(fgw)
@@ -291,7 +301,7 @@ class CWPhaser(object):
 
     def get_phase_marg_log_L(self, fgw, x_com):
         """
-        x_com --> (inc, theta, log10_A, phhase0, phi, psi)
+        x_com --> (cos_inc, cos_theta, log10_A, phhase0, phi, psi)
         """
         assert self.fgw==fgw
 
@@ -687,6 +697,186 @@ def phase_marg_log_L_helper(x_com, fgw, n_psr, psr_poses, N, M, resres, logdet):
 
 
 @njit(fastmath=False)
+def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
+    inc = np.arccos(x_com[0])
+    theta = np.arccos(x_com[1])
+    A = 10**x_com[2]
+    fgw = 10**x_com[3]
+    mc = 10**x_com[4] * const.Tsun
+    phase0 = x_com[5]
+    phi = x_com[6]
+    psi = x_com[7]
+
+    #print(phases)
+    #print(pdists)
+    #print(x_nophase)
+
+    Amp = A/(2*np.pi*fgw)
+
+    cos_inc = np.cos(inc)
+    one_plus_cos_inc_sq = 1+cos_inc**2
+    sin_phi = np.sin(phi)
+    cos_phi = np.cos(phi)
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    cos_2psi = np.cos(2*psi)
+    sin_2psi = np.sin(2*psi)
+    cos_phase0 = np.cos(phase0)
+    sin_phase0 = np.sin(phase0)
+
+    m = np.array([sin_phi, -cos_phi, 0.0])
+    n = np.array([-cos_theta * cos_phi, -cos_theta * sin_phi, sin_theta])
+    omhat = np.array([-sin_theta * cos_phi, -sin_theta * sin_phi, -cos_theta])
+
+    f_min = fff[0]
+    df = fff[1]-fff[0]
+    n_f = fff.size
+    f_lb = f_min - df*(3//2)
+    f_ub = fff[-1] + df*(3//2)
+
+    logL_marg = -0.5*resres -0.5*logdet
+    #for ii in range(n_psr):
+    for ii in prange(n_psr):
+        #print(ii)
+        m_pos = 0.
+        n_pos = 0.
+        cosMu = 0.
+        for j in range(0,3):
+            m_pos += m[j]*psr_poses[ii,j]
+            n_pos += n[j]*psr_poses[ii,j]
+            cosMu -= omhat[j]*psr_poses[ii,j]
+
+        F_p = 0.5 * (m_pos ** 2 - n_pos ** 2) / (1 - cosMu)
+        F_c = (m_pos * n_pos) / (1 - cosMu)
+
+        n_dist = 10
+        p_vals = np.linspace(0.0, 1.0, n_dist+1)[1:]-1/n_dist/2
+        p_dists = psr_pdists[ii,0]+psr_pdists[ii,1]*np.sqrt(2)*np.array([myerfinv.erfinv(2*p_val-1) for p_val in p_vals])
+        #print(psr_pdists[ii,:])
+        #print(p_dists)
+
+        p_dists *= const.kpc/const.c
+
+        w0 = np.pi * fgw
+        omega_p0s = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dists*(1-cosMu))**(-3/8)
+
+        #chi = (omega_p0/w0)**(2.0/3.0)
+        #maybe actually:
+        chis = (omega_p0s/w0)**(-1.0/3.0)
+
+        fpsrs = omega_p0s/np.pi
+        #if ii==28:
+        #    print(w0/np.pi, fpsrs)
+        N = np.zeros((n_dist,4))
+        MM = np.zeros((n_dist,4,4))
+
+        N0s = np.zeros(1+n_dist)
+        fs1 = [fgw,] + [fpsr for fpsr in fpsrs]
+        interp1d_k3(NN0s[ii,:], fs1, N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
+        N1s = np.zeros(1+n_dist)
+        interp1d_k3(NN1s[ii,:], fs1, N1s, f_min, df, n_f, False, 0, f_lb, f_ub)
+
+        for k in range(n_dist):
+            N[k,0] = N0s[0]
+            N[k,1] = N1s[0]
+            N[k,2] = N0s[k+1]
+            N[k,3] = N1s[k+1]
+
+        M00s = np.zeros(1+2*n_dist)
+        fs1 = [fgw,] + [fpsrs[int(k/2)] if k%2==0 else fgw for k in range(2*n_dist)]
+        fs2 = [fgw,] + [fpsrs[int(k/2)] for k in range(2*n_dist)]
+        interp2d_k3(MM00s[ii,:,:], fs1, fs2, M00s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        for k in range(n_dist):
+            MM[k,0,0] = M00s[0]
+            MM[k,2,2] = M00s[2*k+1]
+            MM[k,0,2] = M00s[2*k+2]
+
+        M11s = np.zeros(1+2*n_dist)
+        interp2d_k3(MM11s[ii,:,:], fs1, fs2, M11s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        for k in range(n_dist):
+            MM[k,1,1] = M11s[0]
+            MM[k,3,3] = M11s[2*k+1]
+            MM[k,1,3] = M11s[2*k+2]
+
+        M01s = np.zeros(1+3*n_dist)
+        fs1 = [fgw,] + [fpsrs[int(k/3)] if k%3!=1 else fgw for k in range(3*n_dist)]
+        fs2 = [fgw,] + [fpsrs[int(k/3)] if k%3!=2 else fgw for k in range(3*n_dist)]
+        interp2d_k3(MM01s[ii,:,:], fs1, fs2, M01s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        for k in range(n_dist):
+            MM[k,0,1] = M01s[0]
+            MM[k,2,3] = M01s[3*k+1]
+            MM[k,0,3] = M01s[3*k+2]
+            MM[k,1,2] = M01s[3*k+3]
+
+        #fill in lower diagonal of MM matrix
+        #Ms = MM + MM.T - np.diag(MM.diagonal())
+        M = np.zeros((n_dist,4,4))
+        for k in range(n_dist):
+            M[k,:,:] = MM[k,:,:] + MM[k,:,:].T - np.diag(np.diag(MM[k,:,:]))
+
+        #print(fgw, fpsr)
+        #print(Ns)
+        #print(Ms)
+
+        #define Fe coefficients
+        #a1 =  Amp * (one_plus_cos_inc_sq*cos_2phase0*cos_2psi + 2*cos_inc*sin_2phase0*sin_2psi)
+        #a2 = -Amp * (one_plus_cos_inc_sq*sin_2phase0*cos_2psi - 2*cos_inc*cos_2phase0*sin_2psi)
+        #a3 =  Amp * (one_plus_cos_inc_sq*cos_2phase0*sin_2psi - 2*cos_inc*sin_2phase0*cos_2psi)
+        #a4 = -Amp * (one_plus_cos_inc_sq*sin_2phase0*sin_2psi + 2*cos_inc*cos_2phase0*cos_2psi)
+        a1 =  Amp * (-one_plus_cos_inc_sq*cos_phase0*cos_2psi + 2*cos_inc*sin_phase0*sin_2psi)
+        a2 = -Amp * ( one_plus_cos_inc_sq*sin_phase0*cos_2psi + 2*cos_inc*cos_phase0*sin_2psi)
+        a3 =  Amp * ( one_plus_cos_inc_sq*cos_phase0*sin_2psi + 2*cos_inc*sin_phase0*cos_2psi)
+        a4 =  Amp * ( one_plus_cos_inc_sq*sin_phase0*sin_2psi - 2*cos_inc*cos_phase0*cos_2psi)
+        #print(a1,a2,a3,a4)
+        #define AA and BB
+        AA = F_p*a1 + F_c*a3
+        BB = F_p*a2 + F_c*a4
+
+        #if ii==28:
+        #    print(AA,BB)
+        #    print(N)
+        #    print(M)
+
+        #loop over different distances - add logL_marg/n_dist to logL at each distance
+        for k in range(n_dist):
+            #print(k)
+            chi = chis[k]
+            #f(phi_psr)=alpha + beta*sin(phi_psr) + gamma*cos(phi_psr) + delta*sin(2*phi_psr) + epsilon*cos(2*phi_psr)
+            alpha = AA*N[k,0] + BB*N[k,1] - (AA**2)/2*M[k,0,0] - (BB**2)/2*M[k,1,1] - AA*BB*M[k,0,1] - chi**2*(AA**2+BB**2)/4*M[k,2,2] - chi**2*(AA**2+BB**2)/4*M[k,3,3]
+            beta = -chi*BB*N[k,2] + chi*AA*N[k,3] + chi*AA*BB*M[k,0,2] - chi*AA**2*M[k,0,3] + chi*BB**2*M[k,1,2] - chi*AA*BB*M[k,1,3]
+            gamma = -chi*AA*N[k,2] - chi*BB*N[k,3] + chi*AA**2*M[k,0,2] + chi*AA*BB*M[k,0,3] + chi*AA*BB*M[k,1,2] + chi*BB**2*M[k,1,3]
+            delta = -chi**2*AA*BB/2*(M[k,2,2]-M[k,3,3]) + chi**2*(AA**2-BB**2)/2*M[k,2,3]
+            epsilon = -chi**2*(AA**2-BB**2)/4*M[k,2,2] - chi**2*(BB**2-AA**2)/4*M[k,3,3] - chi**2*AA*BB*M[k,2,3]
+            
+            #convert it into format: a*cos(phi_psr+phase1)+b*cos(2*phi_psr+2*phase2)
+            aa = np.sqrt(beta**2+gamma**2)
+            bb = np.sqrt(delta**2+epsilon**2)
+            phase1 = np.arctan2(-beta,gamma)
+            phase2 = np.arctan2(-delta,epsilon) / 2 #divide by 2 because of how we defined phase2
+            
+            #decide method based on amplitudes - Bessels for small, Laplace for large
+            if (aa+bb)<30.0: #Bessel
+                #print("BESSEL")
+                integral = integral_solution(aa,bb,phase1, phase2)
+                #print((alpha + np.log(integral))/n_dist)
+                logL_marg += (alpha + np.log(integral))/n_dist
+            else: #Laplace
+                #print("LAPLACE")
+                #print(alpha, aa, bb, phase1, phase2)
+                roots = np.array([optimize.brentq(log_integrand_prime, 0.0, np.pi, args=(aa,bb,phase1,phase2))[0],
+                                  optimize.brentq(log_integrand_prime, np.pi, 2*np.pi, args=(aa,bb,phase1,phase2))[0]])
+                #print(roots)
+                phi_max = roots[np.where(log_integrand_double_prime(roots,aa,bb,phase1,phase2)<0.0)][0]
+                #print(phi_max)
+                #print(log_integral_solution_laplace(alpha, aa, bb, phase1, phase2, phi_max)/n_dist)
+                logL_marg += log_integral_solution_laplace(alpha, aa, bb, phase1, phase2, phi_max)/n_dist
+
+    #print(logL_marg)
+
+    return logL_marg
+
+
+@njit(fastmath=False)
 def phase_marg_log_L_evolve_helper(x_nophase, n_psr, psr_poses, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
     #inc = x[0]
     #theta = x[1]
@@ -879,22 +1069,45 @@ def log_integral_solution_laplace(alpha, a, b, phase1, phase2, phi_max):
     L5 = log_integrand_5prime(phi_max,a,b,phase1,phase2)
     L6 = log_integrand_6prime(phi_max,a,b,phase1,phase2)
 
+    #TODO: Figure out why this sometimes fails in next order and gives nan
+    # One example parameter setup that does that is
+    #                                         -85.34037793358107,
+    #                                         114.17153697842005,
+    #                                         27.9038339803143,
+    #                                         -0.42988001878645593,
+    #                                         1.1464393074124968,
+    #                                         1.7290966263015617
+
+    #print(log_integrand_double_prime(phi_max,a,b,phase1,phase2), sigma_sq, L3, L4, L5, L6)
+
     #return alpha + log_integrand(phi_max) - 0.5*np.log(2*np.pi*np.abs(log_integrand_double_prime(phi_max)))
     res = alpha + log_integrand(phi_max,a,b,phase1,phase2) - 0.5*np.log(2*np.pi*sigma_sq)
+    #print(res)
+    #print(1 +
+    #              L4/sigma_sq**2/8 +
+    #              5*L3**2/sigma_sq**3/24 +
+    #              L6/sigma_sq**3/48 +
+    #              35*L4**2/sigma_sq**4/384 +
+    #              7*L3*L5/sigma_sq**4/48 +
+    #              35*L3**2*L4/sigma_sq**5/64 +
+    #              385*L3**4/sigma_sq**6/1152)
     #print(res, log_integrand_4prime(phi_max)/log_integrand_double_prime(phi_max)**2/8, 5*log_integrand_3prime(phi_max)**2/log_integrand_double_prime(phi_max)**4/24)
     #res += np.log(1 +
     #              L4/sigma_sq**2/8 +
     #              5*L3**2/sigma_sq**3/24)
-    res += np.log(1 +
-                  L4/sigma_sq**2/8 +
-                  5*L3**2/sigma_sq**3/24 +
-                  L6/sigma_sq**3/48 +
-                  35*L4**2/sigma_sq**4/384 + 
-                  7*L3*L5/sigma_sq**4/48 +
-                  35*L3**2*L4/sigma_sq**5/64 +
-                  385*L3**4/sigma_sq**6/1152)
+    correction = np.log(1 +
+                        L4/sigma_sq**2/8 +
+                        5*L3**2/sigma_sq**3/24 +
+                        L6/sigma_sq**3/48 +
+                        35*L4**2/sigma_sq**4/384 + 
+                        7*L3*L5/sigma_sq**4/48 +
+                        35*L3**2*L4/sigma_sq**5/64 +
+                        385*L3**4/sigma_sq**6/1152)
 
-    return res
+    if ~np.isnan(correction):
+        return res + correction
+    else:
+        return res
 
 
 @njit(fastmath=False)
