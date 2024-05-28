@@ -19,12 +19,18 @@ from scipy.interpolate import RegularGridInterpolator
 #from fast_interp import interp2d
 #from scipy import optimize
 from quantecon import optimize
-from . import myerfinv
+import myerfinv
 
+#import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
-def innerprod_cho(Nvec, T, cf, x, y):
-    TNx = Nvec.solve(x, left_array=T)
-    TNy = Nvec.solve(y, left_array=T)
+#@profile
+def innerprod_cho(Nvec, T, cf, x, y, TNx=None, TNy=None):
+    if TNx is None:
+        TNx = Nvec.solve(x, left_array=T)
+    if TNy is None:
+        TNy = Nvec.solve(y, left_array=T)
     xNy = Nvec.solve(y, left_array=x)
 
     expval = sl.cho_solve(cf, TNy)
@@ -40,7 +46,7 @@ class CWPhaser(object):
     :param psrTerm: Include the pulsar term in the CW signal model. Default=True
     :param bayesephem: Include BayesEphem model. Default=True
     """
-
+    #@profile
     def __init__(self, psrs, noisedict=None,
                  psrTerm=True, bayesephem=True, pta=None, tnequad=False):
 
@@ -177,8 +183,77 @@ class CWPhaser(object):
 
         #save fgw so we can keep track what N and M was calculated for
         self.fgw = fgw
-
+    #@profile
     def set_up_M_N_interpolators(self, fmin, fmax, n_f):
+        fff = np.linspace(fmin, fmax, n_f)
+        self.fff = fff
+        df = fff[1]-fff[0]
+
+        #self.N0_interps = [] #(sin|data)
+        #self.N1_interps = [] #(cos|data)
+        #self.M00_interps = [] #(sin|sin)
+        #self.M11_interps = [] #(cos|cos)
+        #self.M01_interps = [] #(sin|cos)
+        self.N0s = np.zeros((len(self.psrs),n_f)) #(sin|data)
+        self.N1s = np.zeros((len(self.psrs),n_f)) #(cos|data)
+        self.M00s = np.zeros((len(self.psrs),n_f,n_f)) #(sin|sin)
+        self.M11s = np.zeros((len(self.psrs),n_f,n_f)) #(cos|cos)
+        self.M01s = np.zeros((len(self.psrs),n_f,n_f)) #(sin|cos)
+
+        def task(ii, psr, Nvec, T, cf):
+            print(ii)
+            ntoa = len(psr.toas)
+            print(ntoa)
+
+            NN = np.zeros((n_f, 2))
+            MM = np.zeros((n_f,n_f, 3))
+
+            Sines = np.zeros((n_f, len(psr.toas)))
+            Cosines = np.zeros((n_f, len(psr.toas)))
+            TNx_res = Nvec.solve(psr.residuals, left_array=T)
+            TNx_sines = np.zeros((n_f, T.shape[1]))
+            TNx_cosines = np.zeros((n_f, T.shape[1]))
+            for jj in range(n_f):
+                Sines[jj,:] = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                Cosines[jj,:] = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                TNx_sines[jj,:] = Nvec.solve(Sines[jj,:], left_array=T)
+                TNx_cosines[jj,:] = Nvec.solve(Cosines[jj,:], left_array=T)
+
+            for jj in range(n_f):
+                NN[jj,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], psr.residuals, TNx=TNx_sines[jj,:], TNy=TNx_res)
+                NN[jj,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], psr.residuals, TNx=TNx_cosines[jj,:], TNy=TNx_res)
+
+                for kk in range(n_f):
+                    if jj<=kk:
+                        MM[jj,kk,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Sines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_sines[kk,:])
+                        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
+                    else:
+                        MM[jj,kk,0] = np.copy(MM[kk,jj,0])
+                        MM[jj,kk,1] = np.copy(MM[kk,jj,1])
+                    
+                    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
+
+            return MM,NN
+
+        ii_list = list(range(len(self.psrs)))
+        #with ThreadPoolExecutor(max_workers=2) as executor: #>12 mins for 2 psrs
+        #    MN_return = list(executor.map(lambda ii: task(ii, self.psrs[ii], self.Nvecs[ii], self.Ts[ii], self.cf_sigmas[ii]), ii_list))
+        #with ProcessPoolExecutor(max_workers=2) as executor:    
+        #    MN_return = list(executor.map(lambda ii: task(ii, self.psrs[ii], self.Nvecs[ii], self.Ts[ii], self.cf_sigmas[ii]), ii_list))
+        MN_return = []
+        for ii in range(len(self.psrs)): #3549.39user 10110.74system 11:24.85elapsed 1994%CPU - 2psr
+            MN_return.append(task(ii, self.psrs[ii], self.Nvecs[ii], self.Ts[ii], self.cf_sigmas[ii]))
+
+        for ii in range(len(self.psrs)):
+            self.N0s[ii,:] = MN_return[ii][1][:,0]
+            self.N1s[ii,:] = MN_return[ii][1][:,1]
+
+            self.M00s[ii,:,:] = MN_return[ii][0][:,:,0]
+            self.M11s[ii,:,:] = MN_return[ii][0][:,:,1]
+            self.M01s[ii,:,:] = MN_return[ii][0][:,:,2]
+
+
+    def set_up_M_N_interpolators_0(self, fmin, fmax, n_f):
         fff = np.linspace(fmin, fmax, n_f)
         self.fff = fff
         df = fff[1]-fff[0]
@@ -202,29 +277,60 @@ class CWPhaser(object):
             NN = np.zeros((n_f, 2))
             MM = np.zeros((n_f,n_f, 3))
 
+            Sines = np.zeros((n_f, len(psr.toas)))
+            Cosines = np.zeros((n_f, len(psr.toas)))
+            TNx_res = Nvec.solve(psr.residuals, left_array=T)
+            TNx_sines = np.zeros((n_f, T.shape[1]))
+            TNx_cosines = np.zeros((n_f, T.shape[1]))
             for jj in range(n_f):
-                S1 = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
-                C1 = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                Sines[jj,:] = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                Cosines[jj,:] = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                TNx_sines[jj,:] = Nvec.solve(Sines[jj,:], left_array=T)
+                TNx_cosines[jj,:] = Nvec.solve(Cosines[jj,:], left_array=T)
 
-                #NN[jj,0] = innerprod(Nvec, T, sigmainv, TNT, S1, psr.residuals)
-                #NN[jj,1] = innerprod(Nvec, T, sigmainv, TNT, C1, psr.residuals)
-                NN[jj,0] = innerprod_cho(Nvec, T, cf, S1, psr.residuals)
-                NN[jj,1] = innerprod_cho(Nvec, T, cf, C1, psr.residuals)
+            for jj in range(n_f):
+                NN[jj,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], psr.residuals, TNx=TNx_sines[jj,:], TNy=TNx_res)
+                NN[jj,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], psr.residuals, TNx=TNx_cosines[jj,:], TNy=TNx_res)
+
+                #try parallelizing
+                def task(kk, jj, Nvec, T, cf, Sines, Cosines, TNx_sines, TNx_cosines):
+                    if jj<=kk:
+                        M0 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Sines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_sines[kk,:])
+                        M1 = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
+                        M2 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
+                        return [M0, M1, M2]
+                    else:
+                        M2 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
+                        return [0.0, 0.0, M2]
+
+                kk_list = list(range(n_f))
+                #with ThreadPoolExecutor() as executor: #516.44user 215.85system 8:07.15elapsed 150%CPU
+                with ThreadPoolExecutor(max_workers=10) as executor: #576.99user 247.23system 9:22.61elapsed 146%CPU
+                    M_return = list(executor.map(lambda kk: task(kk, jj, Nvec, T, cf, Sines, Cosines, TNx_sines, TNx_cosines), kk_list))
+
+                M_return = np.array(M_return)
+                #print(M_return)
+                #print(len(M_return))
+                #for kk in range(n_f): #190.37user 43.82system 2:56.34elapsed 132%CPU
+                #    task(kk)
 
                 for kk in range(n_f):
-                    S2 = np.sin(2 * np.pi * fff[kk] * (psr.toas-self.tref))
-                    C2 = np.cos(2 * np.pi * fff[kk] * (psr.toas-self.tref))
-
-                    if jj>kk:
+                    if jj<=kk:
+                        MM[jj,kk,0] = M_return[kk,0]
+                        MM[jj,kk,1] = M_return[kk,1]
+                    else:
                         MM[jj,kk,0] = np.copy(MM[kk,jj,0])
                         MM[jj,kk,1] = np.copy(MM[kk,jj,1])
-                    else:
-                        #MM[jj,kk,0] = innerprod(Nvec, T, sigmainv, TNT, S1, S2) 
-                        #MM[jj,kk,1] = innerprod(Nvec, T, sigmainv, TNT, C1, C2)
-                        MM[jj,kk,0] = innerprod_cho(Nvec, T, cf, S1, S2)
-                        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, C1, C2)
-                    #MM[jj,kk,2] = innerprod(Nvec, T, sigmainv, TNT, S1, C2)
-                    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, S1, C2)
+                    MM[jj,kk,2] = M_return[kk,2]
+
+                #for kk in range(n_f):
+                #    if jj>kk:
+                #        MM[jj,kk,0] = np.copy(MM[kk,jj,0])
+                #        MM[jj,kk,1] = np.copy(MM[kk,jj,1])
+                #    else:
+                #        MM[jj,kk,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Sines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_sines[kk,:])
+                #        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
+                #    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
 
             #self.N0_interps.append(CubicSpline(fff, NN[:,0]))
             #self.N1_interps.append(CubicSpline(fff, NN[:,1]))
