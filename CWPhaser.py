@@ -350,6 +350,35 @@ class CWPhaser(object):
             self.M11s[ii,:,:] = MM[:,:,1]#.astype('float32')
             self.M01s[ii,:,:] = MM[:,:,2]#.astype('float32')
 
+    def update_N_interpolators(self):
+        """
+        Useful for updating N grid when the data changes but nothing else so M stays the same (e.g.~for a new realization in a simulated dataset)
+        """
+        fff = self.fff
+        df = fff[1]-fff[0]
+        n_f = fff.size
+
+        self.N0s = np.zeros((len(self.psrs),n_f)) #(sin|data)
+        self.N1s = np.zeros((len(self.psrs),n_f)) #(cos|data)
+
+        for ii, (psr, Nvec, T, cf) in enumerate(zip(self.psrs, self.Nvecs, self.Ts, self.cf_sigmas)):
+            print(ii)
+            ntoa = len(psr.toas)
+            print(ntoa)
+
+            NN = np.zeros((n_f, 2))
+
+
+            for jj in range(n_f):
+                S1 = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+                C1 = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
+
+                NN[jj,0] = innerprod_cho(Nvec, T, cf, S1, psr.residuals)
+                NN[jj,1] = innerprod_cho(Nvec, T, cf, C1, psr.residuals)
+
+            self.N0s[ii,:] = NN[:,0]
+            self.N1s[ii,:] = NN[:,1]
+
     def save_N_M_to_file(self, filename):
         np.savez(filename, fff=self.fff, N0s=self.N0s, N1s=self.N1s, M00s=self.M00s, M11s=self.M11s, M01s=self.M01s)
 
