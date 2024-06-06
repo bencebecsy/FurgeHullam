@@ -366,15 +366,16 @@ class FurgeHullam(object):
             ntoa = len(psr.toas)
             print(ntoa)
 
-            NN = np.zeros((n_f, 2))
+            TNx_res = Nvec.solve(psr.residuals, left_array=T)
 
+            NN = np.zeros((n_f, 2))
 
             for jj in range(n_f):
                 S1 = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
                 C1 = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
 
-                NN[jj,0] = innerprod_cho(Nvec, T, cf, S1, psr.residuals)
-                NN[jj,1] = innerprod_cho(Nvec, T, cf, C1, psr.residuals)
+                NN[jj,0] = innerprod_cho(Nvec, T, cf, S1, psr.residuals, TNy=TNx_res)
+                NN[jj,1] = innerprod_cho(Nvec, T, cf, C1, psr.residuals, TNy=TNx_res)
 
             self.N0s[ii,:] = NN[:,0]
             self.N1s[ii,:] = NN[:,1]
