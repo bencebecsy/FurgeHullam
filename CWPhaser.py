@@ -422,14 +422,14 @@ class CWPhaser(object):
 
         return incoherent_log_L_helper(x, self.fgw, self.n_psr, self.N, self.M, 0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them
 
-    def get_phase_marg_incoherent_log_L(self, fgw, x_com):
+    def get_phase_marg_incoherent_log_L(self, x_com):
         """
         #x_com --> (log10_A, As[Npsr])
-        x_com --> (log10_As[Npsr])
+        x_com --> (log10_fgw, log10_As[Npsr])
         """
-        assert self.fgw==fgw
-
-        return incoherent_phase_marg_log_L_helper(x_com, self.fgw, self.n_psr, self.N, self.M, 0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them
+        
+        return incoherent_phase_marg_log_L_helper(x_com, self.n_psr, self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s, 0.0, 0.0)
+        #return incoherent_phase_marg_log_L_helper(x_com, self.fgw, self.n_psr, self.N, self.M, 0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them
 
 
 @njit(fastmath=False, parallel=False)
@@ -672,25 +672,59 @@ def log_L_helper(x, fgw, n_psr, psr_poses, N, M, resres, logdet):
 
 
 @njit(fastmath=False)
-def incoherent_phase_marg_log_L_helper(x_com, fgw, n_psr, N, M, resres, logdet):
+def incoherent_phase_marg_log_L_helper(x_com, n_psr, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
     #A = 10**x_com[0]
     #As = np.copy(x_com[1:])
     #Amp = A/(2*np.pi*fgw)
-    As = 10**np.copy(x_com)
+    fgw = 10**x_com[0]
+    As = 10**np.copy(x_com[1:])
     Amps = As/(2*np.pi*fgw)
+
+    f_min = fff[0]
+    df = fff[1]-fff[0]
+    n_f = fff.size
+    f_lb = f_min - df*(3//2)
+    f_ub = fff[-1] + df*(3//2)
 
     logL_marg = -0.5*resres -0.5*logdet
     for ii in range(n_psr):
+        #print(ii)
+        N = np.zeros(2)
+        MM = np.zeros((2,2))
+
+        N0s = np.zeros(1)
+        interp1d_k3(NN0s[ii,:], [fgw,], N0s, f_min, df, n_f, False, 0, f_lb, f_ub)
+        N1s = np.zeros(1)
+        interp1d_k3(NN1s[ii,:], [fgw,], N1s, f_min, df, n_f, False, 0, f_lb, f_ub)
+
+        N[0] = N0s[0]
+        N[1] = N1s[0]
+
+        M00s = np.zeros(1)
+        interp2d_k3(MM00s[ii,:,:], [fgw,], [fgw,], M00s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[0,0] = M00s[0]
+
+        M11s = np.zeros(1)
+        interp2d_k3(MM11s[ii,:,:], [fgw,], [fgw,], M11s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[1,1] = M11s[0]
+
+        M01s = np.zeros(1)
+        interp2d_k3(MM01s[ii,:,:], [fgw,], [fgw,], M01s, [f_min,f_min], [df,df], [n_f,n_f], [False,False], [0,0], [f_lb,f_lb], [f_ub,f_ub])
+        MM[0,1] = M01s[0]
+
+        #fill in lower diagonal of MM matrix
+        #Ms = MM + MM.T - np.diag(MM.diagonal())
+        M = MM + MM.T - np.diag(np.diag(MM))
         
         #AA = Amp*As[ii]
         AA = Amps[ii]
 
         #f(phi_psr)=alpha + beta*sin(phi_psr) + gamma*cos(phi_psr) + delta*sin(2*phi_psr) + epsilon*cos(2*phi_psr)
-        alpha = -AA**2/4*(M[ii,0,0]+M[ii,1,1])
-        beta = AA*N[ii,1]
-        gamma = AA*N[ii,0]
-        delta = -AA**2/2*M[ii,0,1]
-        epsilon = AA**2/4*(M[ii,1,1]-M[ii,0,0])
+        alpha = -AA**2/4*(M[0,0]+M[1,1])
+        beta = AA*N[1]
+        gamma = AA*N[0]
+        delta = -AA**2/2*M[0,1]
+        epsilon = AA**2/4*(M[1,1]-M[0,0])
         
         #convert it into format: a*cos(phi_psr+phase1)+b*cos(2*phi_psr+2*phase2)
         aa = np.sqrt(beta**2+gamma**2)
@@ -698,13 +732,29 @@ def incoherent_phase_marg_log_L_helper(x_com, fgw, n_psr, N, M, resres, logdet):
         phase1 = np.arctan2(-beta,gamma)
         phase2 = np.arctan2(-delta,epsilon) / 2 #divide by 2 because of how we defined phase2
 
-
         #print(alpha, beta, gamma, delta, epsilon)
 
         #print(aa, bb, phase1, phase2)
-        integral = integral_solution(aa,bb,phase1, phase2)
+        #integral = integral_solution(aa,bb,phase1, phase2)
         #print(integral)
-        logL_marg += alpha + np.log(integral)
+        #logL_marg += alpha + np.log(integral)
+
+        if (aa+bb)<30.0: #Bessel
+            #print("BESSEL")
+            integral = integral_solution(aa,bb,phase1, phase2)
+            logL_marg += alpha + np.log(integral)
+        else: #Laplace
+            #print("LAPLACE")
+            #print(alpha, aa, bb, phase1, phase2)
+            #init_guess = (2*np.pi-(phase1-phase2))%(2*np.pi)
+            #phi_max = optimize.newton(log_integrand_prime, init_guess, args=(aa,bb,phase1,phase2), fprime=log_integrand_double_prime)[0]
+            #phi_max = optimize.newton_halley(log_integrand_prime, init_guess, log_integrand_double_prime, log_integrand_3prime, args=(aa,bb,phase1,phase2))[0]
+            roots = np.array([optimize.brentq(log_integrand_prime, 0.0, np.pi, args=(aa,bb,phase1,phase2))[0],
+                              optimize.brentq(log_integrand_prime, np.pi, 2*np.pi, args=(aa,bb,phase1,phase2))[0]])
+            #print(roots)
+            phi_max = roots[np.where(log_integrand_double_prime(roots,aa,bb,phase1,phase2)<0.0)][0]
+            #print(phi_max)
+            logL_marg += log_integral_solution_laplace(alpha, aa, bb, phase1, phase2, phi_max)
 
     return logL_marg
 
@@ -1427,6 +1477,5 @@ def interp2d_k3(f, xout, yout, fout, a, h, n, p, o, lb, ub): #TODO: needs paddin
                 iyj = iy + j
                 #print(f[ixi,iyj])
                 fout[mi] += f[ixi,iyj]*asx[i]*asy[j]
-
 
 
