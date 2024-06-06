@@ -159,7 +159,7 @@ class CWPhaser(object):
     def calculate_M_N_evolve(self, fgw, fpsr):
         self.N = np.zeros((len(self.psrs), 4))
         self.M = np.zeros((len(self.psrs), 4, 4))
-        for ii, (psr, Nvec, TNT, T, sigmainv) in enumerate(zip(self.psrs, self.Nvecs, self.TNTs, self.Ts, self.sigmainvs)):
+        for ii, (psr, Nvec, TNT, T, sigmainv, cf) in enumerate(zip(self.psrs, self.Nvecs, self.TNTs, self.Ts, self.sigmainvs, self.cf_sigmas)):
 
             ntoa = len(psr.toas)
 
@@ -171,18 +171,19 @@ class CWPhaser(object):
             A[2, :] = np.sin(2 * np.pi * fpsr * (psr.toas-self.tref))
             A[3, :] = np.cos(2 * np.pi * fpsr * (psr.toas-self.tref))
 
-            self.N[ii,0] = innerprod(Nvec, T, sigmainv, TNT, A[0, :], psr.residuals)
-            self.N[ii,1] = innerprod(Nvec, T, sigmainv, TNT, A[1, :], psr.residuals)
-            self.N[ii,2] = innerprod(Nvec, T, sigmainv, TNT, A[2, :], psr.residuals)
-            self.N[ii,3] = innerprod(Nvec, T, sigmainv, TNT, A[3, :], psr.residuals)
+            self.N[ii,0] = innerprod_cho(Nvec, T, cf, A[0, :], psr.residuals)
+            self.N[ii,1] = innerprod_cho(Nvec, T, cf, A[1, :], psr.residuals)
+            self.N[ii,2] = innerprod_cho(Nvec, T, cf, A[2, :], psr.residuals)
+            self.N[ii,3] = innerprod_cho(Nvec, T, cf, A[3, :], psr.residuals)
 
             # define M matrix M_ij=(A_i|A_j)
             for jj in range(4):
                 for kk in range(4): #TODO: don't calculate repeating terms multiple times
-                    self.M[ii, jj, kk] = innerprod(Nvec, T, sigmainv, TNT, A[jj, :], A[kk, :])
+                    self.M[ii, jj, kk] = innerprod_cho(Nvec, T, cf, A[jj, :], A[kk, :])
 
         #save fgw so we can keep track what N and M was calculated for
         self.fgw = fgw
+
     #@profile
     def set_up_M_N_interpolators(self, fmin, fmax, n_f):
         fff = np.linspace(fmin, fmax, n_f)
