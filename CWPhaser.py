@@ -37,7 +37,7 @@ def innerprod_cho(Nvec, T, cf, x, y, TNx=None, TNy=None):
     return xNy - TNx @ expval
 
 
-class CWPhaser(object):
+class FurgeHullam(object):
     """
     Class for the phase-marginalized interpolated CW likelihood.
 
