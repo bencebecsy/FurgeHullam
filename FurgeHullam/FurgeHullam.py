@@ -1,25 +1,21 @@
-# -*- coding: utf-8 -*-
+"""C 2024 Bence Becsy
+Fast interpolated and phase-distance marginalized likelihood for CWs in PTA data"""
 
 import numpy as np
 import scipy.special as scs
-import scipy.optimize as sco
 import scipy.linalg as sl
 
 import numba as nb
 from numba import njit,prange
-#from numba_scipy import special as scs
 
 from enterprise import constants as const
 from enterprise.signals import deterministic_signals, gp_signals, signal_base, utils, parameter
 
 from enterprise_extensions import blocks, deterministic
 
-from scipy.interpolate import CubicSpline
-from scipy.interpolate import RegularGridInterpolator
 #from fast_interp import interp2d
-#from scipy import optimize
 from quantecon import optimize
-import myerfinv
+from . import myerfinv
 
 #import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
@@ -333,14 +329,9 @@ class FurgeHullam(object):
                 #        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
                 #    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
 
-            #self.N0_interps.append(CubicSpline(fff, NN[:,0]))
-            #self.N1_interps.append(CubicSpline(fff, NN[:,1]))
             self.N0s[ii,:] = NN[:,0]#.astype('float32')
             self.N1s[ii,:] = NN[:,1]#.astype('float32')
 
-            #self.M00_interps.append(RegularGridInterpolator((fff, fff), MM[:,:,0], method='cubic'))#, bounds_error=True, fill_value=0.0))
-            #self.M11_interps.append(RegularGridInterpolator((fff, fff), MM[:,:,1], method='cubic'))#, bounds_error=True, fill_value=0.0))
-            #self.M01_interps.append(RegularGridInterpolator((fff, fff), MM[:,:,2], method='cubic'))#, bounds_error=True, fill_value=0.0))
             #TODO: maybe switch to this, which can be ~10 times faster on a 100x100 grid interpolation: https://github.com/dbstein/fast_interp
             #print(MM.dtype)
             #self.M00_interps.append(interp2d([fmin,fmin], [fmax,fmax], [df,df], MM[:,:,0].astype('float32'), k=3,  p=[False,False], e=[1,1]))
