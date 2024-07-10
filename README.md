@@ -6,7 +6,9 @@ Fast likelihood for sinusoidal signals in pulsar timing array data utilizing:
 
 Name from Hungarian words "fürge" (meaning quick) and "hullám" (meaning wave).
 
-For more details see: [arXiv:2406.16331](https://arxiv.org/abs/2406.16331)
+For more details on the methods see: [arXiv:2406.16331](https://arxiv.org/abs/2406.16331)
+
+For a tutorial on how to install and run the code see: [Quick-start Guide](https://github.com/bencebecsy/FurgeHullam/blob/main/docs/how_to_run_FurgeHullam.md)
 
 Citation: 
 ```
