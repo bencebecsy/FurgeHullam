@@ -30,6 +30,7 @@ setup(
          'scipy',
          #'enterprise_extensions',
          'numba',
+         'numba_scipy',
          'quantecon',
     ],
     python_requires='>=3.7',

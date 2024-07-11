@@ -7,6 +7,7 @@ import scipy.linalg as sl
 
 import numba as nb
 from numba import njit,prange
+#from numba_scipy import special as scs
 
 from enterprise import constants as const
 from enterprise.signals import deterministic_signals, gp_signals, signal_base, utils, parameter
@@ -35,17 +36,31 @@ def innerprod_cho(Nvec, T, cf, x, y, TNx=None, TNy=None):
 
 class FurgeHullam(object):
     """
-    Class for the phase-marginalized interpolated CW likelihood.
+    Class for the phase-and-distance-marginalized interpolated CW likelihood.
 
     :param psrs: List of `enterprise` Pulsar instances.
-    :param noisedict: Dictionary of white noise parameter values. Default=None
-    :param psrTerm: Include the pulsar term in the CW signal model. Default=True
-    :param bayesephem: Include BayesEphem model. Default=True
     """
     #@profile
-    def __init__(self, psrs, noisedict=None,
-                 psrTerm=True, bayesephem=True, pta=None, tnequad=False):
+    def __init__(self, psrs):
 
+        self.psrs = psrs
+        self.n_psr = len(psrs)
+        self.psr_poses = np.array([psr.pos for psr in psrs])
+        self.psr_pdists = np.array([psr.pdist for psr in psrs])
+
+        self.fgw = None
+        self.N = None
+        self.M = None
+
+    def initialize_inner_product_requirements(self, psrs, noisedict=None, tnequad=False, pta=None):
+        """
+        Method to set up PTA object and required pieces for inner product calculations.
+
+        :param psrs: List of `enterprise` Pulsar instances.
+        :param noisedict: Dictionary of white noise parameter values. Default=None
+        :param tnequad: Flag to indicate using TN convention for equad. Default=False
+        :param pta: Option to provide user defined pta object. Default=None
+        """
         if pta is None:
 
             # initialize standard model with fixed white noise
@@ -59,10 +74,6 @@ class FurgeHullam(object):
             #self.tref = tmin
             self.tref = 53000*86400
             s = gp_signals.TimingModel(use_svd=True)
-            s += deterministic.cw_block_circ(amp_prior='log-uniform',
-                                             psrTerm=psrTerm, tref=self.tref, name='cw')
-            #s += blocks.red_noise_block(prior='log-uniform', psd='powerlaw',
-            #                            Tspan=Tspan, components=30)
 
             log10_A = parameter.Constant()
             gamma = parameter.Constant()
@@ -70,9 +81,6 @@ class FurgeHullam(object):
             # define powerlaw PSD and red noise signal
             pl = utils.powerlaw(log10_A=log10_A, gamma=gamma)
             s += gp_signals.FourierBasisGP(pl, components=30)
-
-            if bayesephem:
-                s += deterministic_signals.PhysicalEphemerisSignal(use_epoch_toas=True)
 
             # adding white-noise, and acting on psr objects
             models = []
@@ -99,18 +107,10 @@ class FurgeHullam(object):
 
         else:
             # user can specify their own pta object
-            # if ECORR is included, use the implementation in gp_signals
             self.pta = pta
             #self.tref = np.min([p.toas.min() for p in psrs])
             self.tref = 53000*86400
 
-        self.psrs = psrs
-        self.n_psr = len(psrs)
-        self.psr_poses = np.array([psr.pos for psr in psrs])
-        self.psr_pdists = np.array([psr.pdist for psr in psrs])
-        self.noisedict = noisedict
-        
-        #TODO: we should have an option of not even having a PTA object if we just use precalculated grid of M and N
         ## precompute important bits:
         self.phiinvs = self.pta.get_phiinv({})
         #print(self.phiinvs)
@@ -119,11 +119,6 @@ class FurgeHullam(object):
         self.Ts = self.pta.get_basis()
         self.cf_sigmas = [sl.cho_factor(TNT + np.diag(phiinv)) for TNT, phiinv in zip(self.TNTs, self.phiinvs)]
         self.sigmainvs = [np.linalg.pinv(TNT + np.diag(phiinv)) for TNT, phiinv in zip(self.TNTs, self.phiinvs)]
-
-        self.fgw = None
-        self.N = None
-        self.M = None
-
 
     def calculate_M_N(self, fgw):
         self.N = np.zeros((len(self.psrs), 2))
@@ -181,7 +176,10 @@ class FurgeHullam(object):
         self.fgw = fgw
 
     #@profile
-    def set_up_M_N_interpolators(self, fmin, fmax, n_f):
+    def set_up_M_N_interpolators(self, fmin, fmax, n_f, psrs, noisedict=None, tnequad=False, pta=None):
+        self.initialize_inner_product_requirements(psrs, noisedict=noisedict, tnequad=tnequad, pta=pta)
+
+
         fff = np.linspace(fmin, fmax, n_f)
         self.fff = fff
         df = fff[1]-fff[0]
@@ -248,98 +246,6 @@ class FurgeHullam(object):
             self.M00s[ii,:,:] = MN_return[ii][0][:,:,0]
             self.M11s[ii,:,:] = MN_return[ii][0][:,:,1]
             self.M01s[ii,:,:] = MN_return[ii][0][:,:,2]
-
-
-    def set_up_M_N_interpolators_0(self, fmin, fmax, n_f):
-        fff = np.linspace(fmin, fmax, n_f)
-        self.fff = fff
-        df = fff[1]-fff[0]
-
-        #self.N0_interps = [] #(sin|data)
-        #self.N1_interps = [] #(cos|data)
-        #self.M00_interps = [] #(sin|sin)
-        #self.M11_interps = [] #(cos|cos)
-        #self.M01_interps = [] #(sin|cos)
-        self.N0s = np.zeros((len(self.psrs),n_f)) #(sin|data)
-        self.N1s = np.zeros((len(self.psrs),n_f)) #(cos|data)
-        self.M00s = np.zeros((len(self.psrs),n_f,n_f)) #(sin|sin)
-        self.M11s = np.zeros((len(self.psrs),n_f,n_f)) #(cos|cos)
-        self.M01s = np.zeros((len(self.psrs),n_f,n_f)) #(sin|cos)
-
-        for ii, (psr, Nvec, T, cf) in enumerate(zip(self.psrs, self.Nvecs, self.Ts, self.cf_sigmas)):
-            print(ii)
-            ntoa = len(psr.toas)
-            print(ntoa)
-
-            NN = np.zeros((n_f, 2))
-            MM = np.zeros((n_f,n_f, 3))
-
-            Sines = np.zeros((n_f, len(psr.toas)))
-            Cosines = np.zeros((n_f, len(psr.toas)))
-            TNx_res = Nvec.solve(psr.residuals, left_array=T)
-            TNx_sines = np.zeros((n_f, T.shape[1]))
-            TNx_cosines = np.zeros((n_f, T.shape[1]))
-            for jj in range(n_f):
-                Sines[jj,:] = np.sin(2 * np.pi * fff[jj] * (psr.toas-self.tref))
-                Cosines[jj,:] = np.cos(2 * np.pi * fff[jj] * (psr.toas-self.tref))
-                TNx_sines[jj,:] = Nvec.solve(Sines[jj,:], left_array=T)
-                TNx_cosines[jj,:] = Nvec.solve(Cosines[jj,:], left_array=T)
-
-            for jj in range(n_f):
-                NN[jj,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], psr.residuals, TNx=TNx_sines[jj,:], TNy=TNx_res)
-                NN[jj,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], psr.residuals, TNx=TNx_cosines[jj,:], TNy=TNx_res)
-
-                #try parallelizing
-                def task(kk, jj, Nvec, T, cf, Sines, Cosines, TNx_sines, TNx_cosines):
-                    if jj<=kk:
-                        M0 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Sines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_sines[kk,:])
-                        M1 = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
-                        M2 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
-                        return [M0, M1, M2]
-                    else:
-                        M2 = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
-                        return [0.0, 0.0, M2]
-
-                kk_list = list(range(n_f))
-                #with ThreadPoolExecutor() as executor: #516.44user 215.85system 8:07.15elapsed 150%CPU
-                with ThreadPoolExecutor(max_workers=10) as executor: #576.99user 247.23system 9:22.61elapsed 146%CPU
-                    M_return = list(executor.map(lambda kk: task(kk, jj, Nvec, T, cf, Sines, Cosines, TNx_sines, TNx_cosines), kk_list))
-
-                M_return = np.array(M_return)
-                #print(M_return)
-                #print(len(M_return))
-                #for kk in range(n_f): #190.37user 43.82system 2:56.34elapsed 132%CPU
-                #    task(kk)
-
-                for kk in range(n_f):
-                    if jj<=kk:
-                        MM[jj,kk,0] = M_return[kk,0]
-                        MM[jj,kk,1] = M_return[kk,1]
-                    else:
-                        MM[jj,kk,0] = np.copy(MM[kk,jj,0])
-                        MM[jj,kk,1] = np.copy(MM[kk,jj,1])
-                    MM[jj,kk,2] = M_return[kk,2]
-
-                #for kk in range(n_f):
-                #    if jj>kk:
-                #        MM[jj,kk,0] = np.copy(MM[kk,jj,0])
-                #        MM[jj,kk,1] = np.copy(MM[kk,jj,1])
-                #    else:
-                #        MM[jj,kk,0] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Sines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_sines[kk,:])
-                #        MM[jj,kk,1] = innerprod_cho(Nvec, T, cf, Cosines[jj,:], Cosines[kk,:], TNx=TNx_cosines[jj,:], TNy=TNx_cosines[kk,:])
-                #    MM[jj,kk,2] = innerprod_cho(Nvec, T, cf, Sines[jj,:], Cosines[kk,:], TNx=TNx_sines[jj,:], TNy=TNx_cosines[kk,:])
-
-            self.N0s[ii,:] = NN[:,0]#.astype('float32')
-            self.N1s[ii,:] = NN[:,1]#.astype('float32')
-
-            #TODO: maybe switch to this, which can be ~10 times faster on a 100x100 grid interpolation: https://github.com/dbstein/fast_interp
-            #print(MM.dtype)
-            #self.M00_interps.append(interp2d([fmin,fmin], [fmax,fmax], [df,df], MM[:,:,0].astype('float32'), k=3,  p=[False,False], e=[1,1]))
-            #self.M11_interps.append(interp2d([fmin,fmin], [fmax,fmax], [df,df], MM[:,:,1].astype('float32'), k=3,  p=[False,False], e=[1,1]))
-            #self.M01_interps.append(interp2d([fmin,fmin], [fmax,fmax], [df,df], MM[:,:,2].astype('float32'), k=3,  p=[False,False], e=[1,1]))
-            self.M00s[ii,:,:] = MM[:,:,0]#.astype('float32')
-            self.M11s[ii,:,:] = MM[:,:,1]#.astype('float32')
-            self.M01s[ii,:,:] = MM[:,:,2]#.astype('float32')
 
     def update_N_interpolators(self):
         """
