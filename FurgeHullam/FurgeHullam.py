@@ -86,7 +86,7 @@ class FurgeHullam(object):
             models = []
             for p in psrs:
                 #if 'NANOGrav' in p.flags['pta']:
-                if True: #always add ecorr for now as some of my simulated pulsars have no flags #TODO: fix this later
+                if False:#True: #always add ecorr for now as some of my simulated pulsars have no flags #TODO: fix this later
                     s2 = s + blocks.white_noise_block(vary=False, inc_ecorr=True,
                                                       gp_ecorr=False, tnequad=tnequad)
                                                       #gp_ecorr=True, tnequad=tnequad)
@@ -104,6 +104,7 @@ class FurgeHullam(object):
                 pta.set_default_params(noisedict)
 
             self.pta = pta
+            print(pta.summary())
 
         else:
             # user can specify their own pta object
@@ -280,15 +281,15 @@ class FurgeHullam(object):
     def save_N_M_to_file(self, filename):
         np.savez(filename, fff=self.fff, N0s=self.N0s, N1s=self.N1s, M00s=self.M00s, M11s=self.M11s, M01s=self.M01s)
 
-    def load_N_M_from_file(self, filename, single_precision=False, skip_first_n_psr=0):
+    def load_N_M_from_file(self, filename, single_precision=False, psr_selection_iter=None):
         npzfile = np.load(filename)
-        if skip_first_n_psr>0:
+        if psr_selection_iter is not None:
             self.fff = npzfile["fff"]
-            self.N0s = npzfile["N0s"][skip_first_n_psr:,:]
-            self.N1s = npzfile["N1s"][skip_first_n_psr:,:]
-            self.M00s = npzfile["M00s"][skip_first_n_psr:,:,:]
-            self.M11s = npzfile["M11s"][skip_first_n_psr:,:,:]
-            self.M01s = npzfile["M01s"][skip_first_n_psr:,:,:]
+            self.N0s = npzfile["N0s"][psr_selection_iter,:]
+            self.N1s = npzfile["N1s"][psr_selection_iter,:]
+            self.M00s = npzfile["M00s"][psr_selection_iter,:,:]
+            self.M11s = npzfile["M11s"][psr_selection_iter,:,:]
+            self.M01s = npzfile["M01s"][psr_selection_iter,:,:]
         else:
             self.fff = npzfile["fff"]
             self.N0s = npzfile["N0s"]
@@ -314,13 +315,18 @@ class FurgeHullam(object):
                                               self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
                                               0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them)
 
-    def get_phase_dist_marg_log_L_evolve(self, x_com):
+    def get_phase_dist_marg_log_L_evolve(self, x_com, phase_shifts=None, psr_poses_evolution=None):
         """
         x_com --> (cos_inc, cos_theta, log10_A, log10_f, log10_mc, phhase0, phi, psi)
         """
+        if phase_shifts is None:
+            phase_shifts = np.zeros(self.n_psr)
+        if psr_poses_evolution is None:
+            psr_poses_evolution = np.copy(self.psr_poses)
+
         return phase_dist_marg_log_L_evolve_helper(x_com, self.n_psr, self.psr_poses, self.psr_pdists,
                                                    self.fff, self.N0s, self.N1s, self.M00s, self.M11s, self.M01s,
-                                                   0.0, 0.0) #set resres and logdet to 0 for now - TODO:fix them)
+                                                   0.0, 0.0, phase_shifts, psr_poses_evolution) #set resres and logdet to 0 for now - TODO:fix them)
 
     def get_log_L(self, fgw, x):
         """
@@ -646,6 +652,7 @@ def incoherent_phase_marg_log_L_helper(x_com, n_psr, fff, NN0s, NN1s, MM00s, MM1
         
         #AA = Amp*As[ii]
         AA = Amps[ii]
+        #print(AA)
 
         #f(phi_psr)=alpha + beta*sin(phi_psr) + gamma*cos(phi_psr) + delta*sin(2*phi_psr) + epsilon*cos(2*phi_psr)
         alpha = -AA**2/4*(M[0,0]+M[1,1])
@@ -781,7 +788,7 @@ def phase_marg_log_L_helper(x_com, fgw, n_psr, psr_poses, N, M, resres, logdet):
 
 
 @njit(fastmath=False)
-def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet):
+def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff, NN0s, NN1s, MM00s, MM11s, MM01s, resres, logdet, phase_shifts, psr_poses_evolution):
     inc = np.arccos(x_com[0])
     theta = np.arccos(x_com[1])
     A = 10**x_com[2]
@@ -805,8 +812,9 @@ def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff
     cos_theta = np.cos(theta)
     cos_2psi = np.cos(2*psi)
     sin_2psi = np.sin(2*psi)
-    cos_phase0 = np.cos(phase0)
-    sin_phase0 = np.sin(phase0)
+    #phases are calculated for each pulsar separately in case there are phase shifts
+    #cos_phase0 = np.cos(phase0)
+    #sin_phase0 = np.sin(phase0)
 
     m = np.array([sin_phi, -cos_phi, 0.0])
     n = np.array([-cos_theta * cos_phi, -cos_theta * sin_phi, sin_theta])
@@ -822,13 +830,19 @@ def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff
     #for ii in range(n_psr):
     for ii in prange(n_psr):
         #print(ii)
+
+        cos_phase0 = np.cos(phase0+phase_shifts[ii])
+        sin_phase0 = np.sin(phase0+phase_shifts[ii])
+
         m_pos = 0.
         n_pos = 0.
         cosMu = 0.
+        cosMu_evol = 0.
         for j in range(0,3):
             m_pos += m[j]*psr_poses[ii,j]
             n_pos += n[j]*psr_poses[ii,j]
             cosMu -= omhat[j]*psr_poses[ii,j]
+            cosMu_evol -= omhat[j]*psr_poses_evolution[ii,j]
 
         F_p = 0.5 * (m_pos ** 2 - n_pos ** 2) / (1 - cosMu)
         F_c = (m_pos * n_pos) / (1 - cosMu)
@@ -842,7 +856,7 @@ def phase_dist_marg_log_L_evolve_helper(x_com, n_psr, psr_poses, psr_pdists, fff
         p_dists *= const.kpc/const.c
 
         w0 = np.pi * fgw
-        omega_p0s = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dists*(1-cosMu))**(-3/8)
+        omega_p0s = w0 *(1 + 256/5 * mc**(5/3) * w0**(8/3) * p_dists*(1-cosMu_evol))**(-3/8)
 
         #chi = (omega_p0/w0)**(2.0/3.0)
         #maybe actually:
